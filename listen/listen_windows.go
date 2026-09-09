@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	identity "github.com/openabstractions/abstraction-identity"
+	"golang.org/x/sys/windows"
 )
 
 var (
@@ -32,6 +33,7 @@ const (
 	fileFlagFirstPipe  = 0x00080000
 	pipeRejectRemote   = 8
 	unlimitedInstances = 255
+	integrityMedium    = 0x2000
 )
 
 var (
@@ -51,6 +53,7 @@ func (c *pipeConn) Bind() (*identity.Binding, error) {
 
 type pipeListener struct {
 	name    *uint16
+	sa      *windows.SecurityAttributes
 	mu      sync.Mutex
 	waiting syscall.Handle
 	closed  bool
@@ -61,7 +64,11 @@ func Listen(name string) (Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &pipeListener{name: n}
+	sa, err := ownAccountOnly()
+	if err != nil {
+		return nil, err
+	}
+	l := &pipeListener{name: n, sa: sa}
 	if l.waiting, err = l.instance(fileFlagFirstPipe); errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
 		return nil, fmt.Errorf("%w: %s", ErrTaken, name)
 	} else if err != nil {
@@ -70,12 +77,62 @@ func Listen(name string) (Listener, error) {
 	return l, nil
 }
 
-// The first instance claims the name, so nothing is already listening on it
-// and nothing can start listening beside it. The first line of every protocol
-// on these pipes carries a secret, and a listener sharing the name is handed it.
+// A pipe created with no descriptor of its own does not get a closed door. The
+// pipe filesystem supplies one that grants Everyone and ANONYMOUS LOGON read,
+// and no integrity label, so a sandboxed process in this account reads it too.
+// Both were measured, and both are attacked in listen_attack_windows_test.go.
+func ownAccountOnly() (*windows.SecurityAttributes, error) {
+	tok := windows.Token(windows.GetCurrentProcessToken())
+	u, err := tok.GetTokenUser()
+	if err != nil {
+		return nil, fmt.Errorf("listen: whose account this is could not be read: %w", err)
+	}
+	sd, err := windows.SecurityDescriptorFromString(
+		"D:P(A;;FA;;;" + u.User.Sid.String() + ")S:(ML;;NRNWNX;;;" + ourLabel(tok) + ")")
+	if err != nil {
+		return nil, fmt.Errorf("listen: the pipe's door could not be built: %w", err)
+	}
+	return &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: sd,
+	}, nil
+}
+
+// Medium is the integrity of the ordinary interactive process every client of
+// this layer is, and it is the level below which a process can no longer write
+// to the account's own profile - so below it a process is in the account
+// without being able to act for it. Nothing may label an object above itself,
+// and that refusal would arrive as the ACCESS_DENIED Listen reports as a taken
+// name, so a service running lower than medium labels at its own level instead
+// of failing with the wrong sentence.
+func ourLabel(tok windows.Token) string {
+	var n uint32
+	windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, nil, 0, &n)
+	if n == 0 {
+		return "ME"
+	}
+	buf := make([]byte, n)
+	if err := windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, &buf[0], n, &n); err != nil {
+		return "ME"
+	}
+	sid := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buf[0])).Label.Sid
+	if sid == nil || sid.SubAuthorityCount() == 0 {
+		return "ME"
+	}
+	if sid.SubAuthority(uint32(sid.SubAuthorityCount())-1) < integrityMedium {
+		return "LW"
+	}
+	return "ME"
+}
+
+// The first instance claims the name, so nothing is already listening on it.
+// It does not stop something starting beside it afterwards: the flag is a
+// promise to whoever passes it, and an attacker omitting it is answered by the
+// descriptor instead, which admits one account and nothing else.
+// TestWhoCanStillTakeTheName is where that boundary is measured.
 func (l *pipeListener) instance(claim uintptr) (syscall.Handle, error) {
 	h, _, err := createNamedPipe.Call(uintptr(unsafe.Pointer(l.name)), pipeAccessDuplex|fileFlagOverlapped|claim, pipeRejectRemote,
-		unlimitedInstances, 4096, 4096, 0, 0)
+		unlimitedInstances, 4096, 4096, 0, uintptr(unsafe.Pointer(l.sa)))
 	if syscall.Handle(h) == syscall.InvalidHandle {
 		return 0, err
 	}

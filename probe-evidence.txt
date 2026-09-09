@@ -1,0 +1,230 @@
+macOS 15.7.4, arm64, one console user, 2026-09-05. Machine identifiers are
+replaced; every other number is exactly as measured.
+
+  <uid>   the console user's uid (501 on a first macOS account)
+  <gid>   its primary group (staff)
+  <asid>  the audit session id of the login session
+  +TZ     the local UTC offset. Timestamps are otherwise untouched, so every
+          interval and ordering in this file still holds
+  /Users/tester/                     the real home directory
+  /var/folders/<darwin-user-temp>/   the per-user temporary directory
+
+Process ids and pidversions are kept as measured. They are ephemeral and name
+nobody, and which pid each mechanism reported is the entire finding.
+
+probe pid 52135 uid <uid>
+ceiling: darwin: user=kernel process=bound path=bound package=bound code=bound
+
+##################################################
+# EXPERIMENT 1: socket owner drift, impersonator STAYS ALIVE
+# (the repo's own test lets /bin/echo exit before it looks)
+##################################################
+server read "hello" from the real caller (this probe, pid 52135)
+
+=== BASELINE: the process that connected and wrote is this probe ===
+  LOCAL_PEERCRED : version=0 uid=<uid> ngroups=16 gid0=<gid>
+  LOCAL_PEERPID  : 52135  exec=./probe
+  LOCAL_PEERTOKEN: pid=52135 pidversion=619280 euid=<uid> auid=<uid> asid=<asid>
+                   exec=./probe
+                   start=2026-09-05T16:35:27.157345+TZ  connectedAt=2026-09-05T16:35:27.167874+TZ  startedAfterConnect=false
+  package        : darwin/unix user=uid=<uid> gid=<gid> asid=<asid>[kernel] process=pid 52135.619280 started 2026-09-05T16:35:27.157345+TZ[bound] path=/Users/tester/verify-mac-claims/probe/probe[bound] package=a.out[bound] code=valid[bound]
+
+spawned /bin/cat as pid 52136 with the connected socket as its stdout
+server read "i am cat\n" -- written by /bin/cat, which is STILL RUNNING
+
+=== AFTER DRIFT: /bin/cat (pid above) performed the last socket write and is alive ===
+  LOCAL_PEERCRED : version=0 uid=<uid> ngroups=16 gid0=<gid>
+  LOCAL_PEERPID  : 52136  exec=/bin/cat
+  LOCAL_PEERTOKEN: pid=52136 pidversion=619282 euid=<uid> auid=<uid> asid=<asid>
+                   exec=/bin/cat
+                   start=2026-09-05T16:35:27.174528+TZ  connectedAt=2026-09-05T16:35:27.167874+TZ  startedAfterConnect=true
+  package        : darwin/unix user=uid=<uid> gid=<gid> asid=<asid>[kernel] process=pid 52136.619282 started 2026-09-05T16:35:27.174528+TZ RECYCLED[pid] path=unknown(the socket now points at a process that started at 2026-09-05T16:35:27.174528+TZ, after this connection existed at 2026-09-05T16:35:27.167874+TZ; it is not the peer that connected) package=unknown(the socket now points at a process that started at 2026-09-05T16:35:27.174528+TZ, after this connection existed at 2026-09-05T16:35:27.167874+TZ; it is not the peer that connected) code=unknown(the socket now points at a process that started at 2026-09-05T16:35:27.174528+TZ, after this connection existed at 2026-09-05T16:35:27.167874+TZ; it is not the peer that connected)
+                   note: process: the socket now points at a process that started at 2026-09-05T16:35:27.174528+TZ, after this connection existed at 2026-09-05T16:35:27.167874+TZ; it is not the peer that connected
+
+=== AFTER THE IMPERSONATOR EXITED (this is what the repo test observed) ===
+  LOCAL_PEERCRED : version=0 uid=<uid> ngroups=16 gid0=<gid>
+  LOCAL_PEERPID  : 52136  exec=<procargs2: invalid argument>
+  LOCAL_PEERTOKEN: ERROR invalid argument (errno 22)
+  package        : darwin/unix user=uid=<uid> gid=<gid>[kernel] process=unknown(the peer socket has no process behind it any more (LOCAL_PEERTOKEN: invalid argument)) path=unknown(the peer socket has no process behind it any more (LOCAL_PEERTOKEN: invalid argument)) package=unknown(the peer socket has no process behind it any more (LOCAL_PEERTOKEN: invalid argument)) code=unknown(the peer socket has no process behind it any more (LOCAL_PEERTOKEN: invalid argument))
+                   note: process: the peer socket has no process behind it any more (LOCAL_PEERTOKEN: invalid argument)
+
+##################################################
+# EXPERIMENT 2: the impersonator EXISTED BEFORE the connection
+# A helper is forked first, holding the not-yet-connected socket.
+# After the connection it exec()s /bin/cat, keeping its pid and
+# its p_starttime -- which predates the connection.
+##################################################
+forked helper /bin/sh as pid 52137, start=2026-09-05T16:35:27.282086+TZ, exec=/bin/sh
+connected at 2026-09-05T16:35:27.686104+TZ (helper is 404.018ms older)
+server read "hello" from the real caller (this probe, pid 52135)
+
+=== BASELINE: the connecting process is this probe ===
+  LOCAL_PEERCRED : version=0 uid=<uid> ngroups=16 gid0=<gid>
+  LOCAL_PEERPID  : 52135  exec=./probe
+  LOCAL_PEERTOKEN: pid=52135 pidversion=619280 euid=<uid> auid=<uid> asid=<asid>
+                   exec=./probe
+                   start=2026-09-05T16:35:27.157345+TZ  connectedAt=2026-09-05T16:35:27.686104+TZ  startedAfterConnect=false
+  package        : darwin/unix user=uid=<uid> gid=<gid> asid=<asid>[kernel] process=pid 52135.619280 started 2026-09-05T16:35:27.157345+TZ[bound] path=/Users/tester/verify-mac-claims/probe/probe[bound] package=a.out[bound] code=valid[bound]
+
+helper pid 52137 after exec: exec=/bin/cat start=2026-09-05T16:35:27.282086+TZ (unchanged by exec: true)
+server read "i am cat\n" -- written by the pre-existing helper now running /bin/cat
+
+=== AFTER DRIFT TO A PRE-EXISTING PROCESS RUNNING /bin/cat ===
+  LOCAL_PEERCRED : version=0 uid=<uid> ngroups=16 gid0=<gid>
+  LOCAL_PEERPID  : 52137  exec=/bin/cat
+  LOCAL_PEERTOKEN: pid=52137 pidversion=619286 euid=<uid> auid=<uid> asid=<asid>
+                   exec=/bin/cat
+                   start=2026-09-05T16:35:27.282086+TZ  connectedAt=2026-09-05T16:35:27.686104+TZ  startedAfterConnect=false
+  package        : darwin/unix user=uid=<uid> gid=<gid> asid=<asid>[kernel] process=pid 52137.619286 started 2026-09-05T16:35:27.282086+TZ[bound] path=/bin/cat[bound] package=com.apple.cat[bound] code=Software Signing (issued by Apple Code Signing Certification Authority)[bound]
+
+##################################################
+# EXPERIMENT 3: what survives the peer, and what a listening socket answers
+##################################################
+listening socket: SO_ACCEPTCONN = 0 (err protocol not available)  <-- the package refuses on this
+listening socket: LOCAL_PEERCRED = ERROR socket is not connected
+listening socket: package OfHandle = identity: connection carries no peer credentials: LOCAL_PEERCRED: socket is not connected (ErrNotServerEnd=false)
+server read "from-a-child\n"
+
+=== PEER (and every process that touched it) HAS EXITED ===
+  LOCAL_PEERCRED : version=0 uid=<uid> ngroups=16 gid0=<gid>
+  LOCAL_PEERPID  : ERROR socket is not connected
+  LOCAL_PEERTOKEN: ERROR socket is not connected (errno 57)
+  package        : darwin/unix user=uid=<uid> gid=<gid>[kernel] process=unknown(the peer socket has no process behind it any more (LOCAL_PEERTOKEN: socket is not connected)) path=unknown(the peer socket has no process behind it any more (LOCAL_PEERTOKEN: socket is not connected)) package=unknown(the peer socket has no process behind it any more (LOCAL_PEERTOKEN: socket is not connected)) code=unknown(the peer socket has no process behind it any more (LOCAL_PEERTOKEN: socket is not connected))
+                   note: process: the peer socket has no process behind it any more (LOCAL_PEERTOKEN: socket is not connected)
+
+##################################################
+# EXPERIMENT 4: proof strength of differently-signed peers
+##################################################
+
+--- go-linker ad-hoc (as built) ---
+codesign -dv: Executable=/private/var/folders/<darwin-user-temp>/T/sig2951309578/peer
+Identifier=a.out
+Format=Mach-O thin (arm64)
+CodeDirectory v=20400 size=31358 flags=0x20002(adhoc,linker-signed) hashes=977+0 location=embedded
+raw Security  : guest="No error." check="No error." ok=true ident="a.out" team="" subject="" path="/private/var/folders/<darwin-user-temp>/T/sig2951309578/peer" cdflags=0x20002
+package Code  : proof=bound trusted=true status="valid" subject="" team=""
+package Pkg   : proof=bound value="a.out"
+
+--- explicit ad-hoc (codesign -s -) ---
+codesign -dv: Executable=/private/var/folders/<darwin-user-temp>/T/sig3585768007/peer
+Identifier=peer-55554944febc88eb0e1f368c80c467a1d0209147
+Format=Mach-O thin (arm64)
+CodeDirectory v=20400 size=31462 flags=0x2(adhoc) hashes=977+2 location=embedded
+raw Security  : guest="No error." check="No error." ok=true ident="peer-55554944febc88eb0e1f368c80c467a1d0209147" team="" subject="" path="/private/var/folders/<darwin-user-temp>/T/sig3585768007/peer" cdflags=0x2
+package Code  : proof=bound trusted=true status="valid" subject="" team=""
+package Pkg   : proof=bound value="peer-55554944febc88eb0e1f368c80c467a1d0209147"
+
+--- ad-hoc + hardened runtime ---
+codesign -dv: Executable=/private/var/folders/<darwin-user-temp>/T/sig357143495/peer
+Identifier=peer-55554944febc88eb0e1f368c80c467a1d0209147
+Format=Mach-O thin (arm64)
+CodeDirectory v=20500 size=31470 flags=0x10002(adhoc,runtime) hashes=977+2 location=embedded
+raw Security  : guest="No error." check="No error." ok=true ident="peer-55554944febc88eb0e1f368c80c467a1d0209147" team="" subject="" path="/private/var/folders/<darwin-user-temp>/T/sig357143495/peer" cdflags=0x10002
+package Code  : proof=bound trusted=true status="valid" subject="" team=""
+package Pkg   : proof=bound value="peer-55554944febc88eb0e1f368c80c467a1d0209147"
+
+--- signature removed ---
+codesign -dv: /var/folders/<darwin-user-temp>/T/sig3307293886/peer: code object is not signed at all
+
+PEER NEVER CONNECTED: accept unix /var/folders/<darwin-user-temp>/T/pb663599113/s: i/o timeout -- process result: signal: killed
+
+##################################################
+# EXPERIMENT 7: does CodeRequirement "anchor apple" survive the drift?
+##################################################
+(a) honest ad-hoc peer vs "anchor apple": proof=bound trusted=false status="code failed to satisfy specified code requirement(s)"
+(b) SAME caller, socket drifted to a pre-forked /bin/cat, vs "anchor apple":
+    Code    proof=bound trusted=true status="valid" subject="Software Signing"
+    Path    proof=bound value="/bin/cat"
+    Package value="com.apple.cat"
+    >>> Peer.Check(user=kernel process=bound path=bound code=bound) PASSED <<<
+
+##################################################
+# EXPERIMENT 5: is kSecGuestAttributeAudit really honoured,
+# or does SecCodeCopyGuestWithAttributes just use the pid?
+##################################################
+genuine token for peer pid 52153: pidversion=619321 euid=<uid> asid=<asid>
+  as-is                     : guest="No error." check="No error." ok=true ident="a.out" team="" subject="" path="/Users/tester/verify-mac-claims/probe/probe" cdflags=0x20002
+  pidversion +1000          : guest="host has no guest with the requested attributes" check="guest lookup failed" ok=false ident="" team="" subject="" path="" cdflags=0xffffffff
+  pid -> this probe ( 52135): guest="host has no guest with the requested attributes" check="guest lookup failed" ok=false ident="" team="" subject="" path="" cdflags=0xffffffff
+  pid -> probe, pidversion 0: guest="host has no guest with the requested attributes" check="guest lookup failed" ok=false ident="" team="" subject="" path="" cdflags=0xffffffff
+  euid/ruid -> 0            : guest="No error." check="No error." ok=true ident="a.out" team="" subject="" path="/Users/tester/verify-mac-claims/probe/probe" cdflags=0x20002
+  pid -> 1 (launchd), ver 0 : guest="host has no guest with the requested attributes" check="guest lookup failed" ok=false ident="" team="" subject="" path="" cdflags=0xffffffff
+  pid -> 999999 (no such)   : guest="UNIX[No such process]" check="guest lookup failed" ok=false ident="" team="" subject="" path="" cdflags=0xffffffff
+
+##################################################
+# EXPERIMENT 6: does pidversion (and p_starttime) survive exec(2)?
+##################################################
+  /bin/sh  pid=52154 pidversion=619324 start=2026-09-05T16:35:32.741947+TZ exec=/bin/bash
+  /bin/cat pid=52154 pidversion=619325 start=2026-09-05T16:35:32.741947+TZ exec=/bin/cat
+  same pid=true  pidversion changed=true  start time changed=false
+  connectedAt=2026-09-05T16:35:32.743527+TZ -> the post-exec process still predates it: true
+
+##################################################
+# RE-MEASURED 2026-09-06 on the same machine
+##################################################
+macOS 15.7.4 build 24G517, arm64, Go 1.27.1, Xcode clang 17.0.0. Same OS build
+as 2026-09-05, so this repeats the measurement; it does not test a newer macOS.
+
+Every headline above reproduced. Identical, in substance:
+
+  exp 6  p_starttime survives exec(2); pidversion does not
+         same pid=true  pidversion changed=true  start time changed=false
+  exp 2  a helper forked 405.561ms before the connection, exec'ing /bin/cat
+         after it, is reported startedAfterConnect=false and resolves to
+         path=/bin/cat[bound] package=com.apple.cat[bound]
+         code=Software Signing (issued by Apple Code Signing Certification
+         Authority)[bound]
+  exp 7  >>> Peer.Check(user=kernel process=bound path=bound code=bound)
+         PASSED <<< for that peer, against CodeRequirement "anchor apple"
+  exp 3  SO_ACCEPTCONN on a listening AF_UNIX socket still fails ENOPROTOOPT;
+         the getpeername discrimination refuses it correctly
+  exp 5  kSecGuestAttributeAudit is honoured: pidversion+1000, a substituted
+         pid, and pid 1 all fail the guest lookup. euid/ruid substitution is
+         ignored, the lookup succeeds on the audit token alone
+  exp 4  an unsigned arm64 peer is killed by the kernel before it can connect,
+         exactly as before -- the "signature removed" case cannot be measured
+         on Apple Silicon and never has been
+
+So the decision that authority is designation, not identity, still rests on a
+measurement that holds. Nothing on this platform changed under it.
+
+##################################################
+# THE PACKAGE'S OWN TEST SUITE, run for the first time on macOS
+##################################################
+github.com/openabstractions/abstraction-identity at the org HEAD that a v0.2.0
+tag would freeze, GOWORK=off, on the machine above.
+
+  CGO_ENABLED=1  build ok   vet ok   test FAIL  1 of 20
+      TestSocketOwnerDriftToAPreExistingProcessIsRefused
+      All three of its assertions fire. This is deliberate: the test's own
+      doc comment says "it fails on macOS 15.7.4". It is an executable record
+      of the unfixed hole, and it means the suite is red by design.
+
+  CGO_ENABLED=0  build ok   vet ok   test FAIL  2 of 20
+      TestSocketOwnerDriftToAPreExistingProcessIsRefused  (as above, on path
+      alone -- there is no code identity in this build to borrow)
+      TestDarwinRefusesToPromiseASignature
+      CanEver(Need{Code: ProofSigned}) returns the no-cgo reason instead of
+      the one that names XPC, and the test requires the transport to be named.
+      codesign_nocgo_darwin.go had never been built before today.
+
+##################################################
+# THE PROBE MODULE, as a v0.2.0 tag would publish it
+##################################################
+Published at abstraction-identity/probe/, this module did not build:
+
+  replacement directory .. does not exist
+  missing go.sum entry for module providing package golang.org/x/sys/unix
+
+The replace is relative to probe/, so .. names a sibling
+of probe/ inside the repo. The repo root is one level up and is spelt "..".
+Fixed here to "..", and go.sum added. Both verified: build and vet clean.
+
+The replace path is therefore correct for where this file is published and
+wrong where it is stored -- research/darwin-verification/.. is research/,
+which holds no module. It cannot be right in both places.
+
+Neither fault was catchable by the release plan's own check: probe/ carries
+its own go.mod, so `go build ./...` at the repo root never descends into it.
+Nothing reaches the module proxy either way -- the root module's zip excludes
+a nested module, and "module probe" is not a path anyone can resolve.

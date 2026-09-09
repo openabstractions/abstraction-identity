@@ -1,0 +1,166 @@
+package listen
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"sync"
+	"syscall"
+	"time"
+	"unsafe"
+
+	identity "github.com/openabstractions/abstraction-identity"
+)
+
+var (
+	kernel32         = syscall.NewLazyDLL("kernel32.dll")
+	createNamedPipe  = kernel32.NewProc("CreateNamedPipeW")
+	connectNamedPipe = kernel32.NewProc("ConnectNamedPipe")
+	cancelIoEx       = kernel32.NewProc("CancelIoEx")
+	createEvent      = kernel32.NewProc("CreateEventW")
+	overlappedResult = kernel32.NewProc("GetOverlappedResult")
+	waitNamedPipe    = kernel32.NewProc("WaitNamedPipeW")
+)
+
+const (
+	errPipeConnected   = syscall.Errno(535)
+	errPipeBusy        = syscall.Errno(231)
+	busyWait           = 5000
+	pipeAccessDuplex   = 3
+	fileFlagOverlapped = 0x40000000
+	fileFlagFirstPipe  = 0x00080000
+	pipeRejectRemote   = 8
+	unlimitedInstances = 255
+)
+
+var (
+	errConnect = errors.New("listen: a client left before it was connected")
+	ErrTaken   = errors.New("listen: the name is taken: another listener holds it, or a client of the last one has not hung up")
+)
+
+type pipeConn struct {
+	*os.File
+	h  syscall.Handle
+	at time.Time
+}
+
+func (c *pipeConn) Bind() (*identity.Binding, error) {
+	return identity.Bind(identity.Handle(c.h), &identity.Options{ConnectedAt: c.at})
+}
+
+type pipeListener struct {
+	name    *uint16
+	mu      sync.Mutex
+	waiting syscall.Handle
+	closed  bool
+}
+
+func Listen(name string) (Listener, error) {
+	n, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, err
+	}
+	l := &pipeListener{name: n}
+	if l.waiting, err = l.instance(fileFlagFirstPipe); errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+		return nil, fmt.Errorf("%w: %s", ErrTaken, name)
+	} else if err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+// The first instance claims the name, so nothing is already listening on it
+// and nothing can start listening beside it. The first line of every protocol
+// on these pipes carries a secret, and a listener sharing the name is handed it.
+func (l *pipeListener) instance(claim uintptr) (syscall.Handle, error) {
+	h, _, err := createNamedPipe.Call(uintptr(unsafe.Pointer(l.name)), pipeAccessDuplex|fileFlagOverlapped|claim, pipeRejectRemote,
+		unlimitedInstances, 4096, 4096, 0, 0)
+	if syscall.Handle(h) == syscall.InvalidHandle {
+		return 0, err
+	}
+	return syscall.Handle(h), nil
+}
+
+func (l *pipeListener) Accept() (Conn, error) {
+	l.mu.Lock()
+	h, closed := l.waiting, l.closed
+	l.mu.Unlock()
+	if closed {
+		return nil, net.ErrClosed
+	}
+
+	cerr := connect(h)
+	at := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil, net.ErrClosed
+	}
+	next, err := l.instance(0)
+	if err != nil {
+		syscall.CloseHandle(h)
+		return nil, err
+	}
+	l.waiting = next
+	if cerr != nil {
+		syscall.CloseHandle(h)
+		return nil, errConnect
+	}
+	return &pipeConn{File: os.NewFile(uintptr(h), "pipe"), h: h, at: at}, nil
+}
+
+func connect(h syscall.Handle) error {
+	ev, _, err := createEvent.Call(0, 1, 0, 0)
+	if ev == 0 {
+		return err
+	}
+	defer syscall.CloseHandle(syscall.Handle(ev))
+	o := syscall.Overlapped{HEvent: syscall.Handle(ev)}
+	r, _, err := connectNamedPipe.Call(uintptr(h), uintptr(unsafe.Pointer(&o)))
+	if r != 0 || errors.Is(err, errPipeConnected) {
+		return nil
+	}
+	if !errors.Is(err, syscall.ERROR_IO_PENDING) {
+		return err
+	}
+	var n uint32
+	if r, _, err = overlappedResult.Call(uintptr(h), uintptr(unsafe.Pointer(&o)), uintptr(unsafe.Pointer(&n)), 1); r == 0 {
+		return err
+	}
+	return nil
+}
+
+func (l *pipeListener) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closed = true
+	cancelIoEx.Call(uintptr(l.waiting), 0)
+	return syscall.CloseHandle(l.waiting)
+}
+
+func Dial(name string) (net.Conn, error) {
+	for {
+		f, err := os.OpenFile(name, os.O_RDWR, 0)
+		if err == nil {
+			return fileConn{f}, nil
+		}
+		if !errors.Is(err, errPipeBusy) {
+			return nil, err
+		}
+		n, _ := syscall.UTF16PtrFromString(name)
+		if r, _, err := waitNamedPipe.Call(uintptr(unsafe.Pointer(n)), busyWait); r == 0 {
+			return nil, err
+		}
+	}
+}
+
+type fileConn struct{ *os.File }
+
+func (fileConn) LocalAddr() net.Addr              { return nil }
+func (fileConn) RemoteAddr() net.Addr             { return nil }
+func (fileConn) SetDeadline(time.Time) error      { return nil }
+func (fileConn) SetReadDeadline(time.Time) error  { return nil }
+func (fileConn) SetWriteDeadline(time.Time) error { return nil }
+
+func Endpoint(service string) string { return `\\.\pipe\openabstractions-` + service }

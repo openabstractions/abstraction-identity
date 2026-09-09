@@ -250,17 +250,20 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 	case opts.skipCodeSignature():
 		p.Code = unknown[Code]("code", "signature verification was skipped by the caller")
 	default:
-		code, ident, path, err := verifyAuditToken(token, opts)
+		code, verdict, ident, path, err := verifyAuditToken(token, opts)
+		// Accepted code is worth the socket binding and no more, which is
+		// the same cap ceiling() applies; a verdict below it is untouched.
+		verdict = min(verdict, ProofPID)
 		switch {
 		case err != nil:
 			p.Code = unknown[Code]("code", "verification could not be performed: "+err.Error())
 			p.note("code: %v", err)
+		case verdict < ProofPID:
+			p.recordCode(code, verdict, "")
+			p.Package = unknown[string]("package", "nothing is read out of a signature the platform did not accept ("+code.Status+")")
 		default:
 			signedPath = path
-			p.Code = attr("code", code, ProofPID, whySocketBinding+"; "+whyNoXPC)
-			if !code.Trusted {
-				p.note("code: %s", code.Status)
-			}
+			p.recordCode(code, verdict, whySocketBinding+"; "+whyNoXPC)
 			if ident != "" {
 				p.Package = attr("package", ident, ProofPID,
 					"the signing identifier out of the signature the OS validated; "+whySocketBinding)

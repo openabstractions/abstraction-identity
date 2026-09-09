@@ -78,16 +78,27 @@ func TestCheckReportsEveryShortfallAtOnce(t *testing.T) {
 }
 
 func TestProofOrderIsTheDocumentedOne(t *testing.T) {
-	order := []Proof{ProofNone, ProofClaimed, ProofPID, ProofBound, ProofKernel, ProofSigned}
+	order := []Proof{ProofNone, ProofClaimed, ProofInvalid, ProofUnsigned, ProofUnmet, ProofPID, ProofBound, ProofKernel, ProofSigned}
 	for i := 1; i < len(order); i++ {
 		if !(order[i-1] < order[i]) {
 			t.Fatalf("%s is not weaker than %s", order[i-1], order[i])
 		}
 	}
 	// ProofClaimed sits below everything the operating system says, which is
-	// the whole point of it existing.
-	if ProofClaimed >= ProofPID {
+	// the whole point of it existing - and a verdict is something the OS said.
+	if ProofClaimed >= ProofInvalid {
 		t.Error("a claim by the peer ranks at or above something the OS said")
+	}
+	// The three verdicts sit below every rung that implies verification, so
+	// a policy written as a minimum refuses them without consulting anything
+	// but the rung.
+	for _, v := range []Proof{ProofInvalid, ProofUnsigned, ProofUnmet} {
+		if v >= ProofPID {
+			t.Errorf("%s ranks at or above ProofPID; an unverified signature would satisfy a policy that implies verification", v)
+		}
+		if unknown[Code]("code", "x").Proof() >= v {
+			t.Errorf("%s does not rank above an unknown attribute", v)
+		}
 	}
 	if got := Proof(99).String(); !strings.Contains(got, "99") {
 		t.Errorf("unknown proof rendered as %q", got)

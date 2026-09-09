@@ -55,6 +55,11 @@ type Peer struct {
 	// a stronger statement - attached to a weaker binding, because a unix
 	// socket cannot prove which process it belongs to. On Linux it is always
 	// unset: the platform has nothing to verify. See CONTRACT.md.
+	//
+	// A signature the platform examined and did not accept is reported below
+	// ProofPID, at ProofInvalid, ProofUnsigned or ProofUnmet, so AtLeast
+	// refuses it for any policy that implies verification and admits it only
+	// for a policy that names the lower rung.
 	Code Attr[Code]
 
 	// Notes records everything a reader would otherwise get wrong about this
@@ -203,8 +208,9 @@ type Code struct {
 	Issuer string
 	// Trusted is true when the platform's own trust policy accepted the
 	// signature and the chain, with revocation checking as configured in
-	// Options. A Code with Trusted false is a signature that exists and
-	// failed, and Status says how.
+	// Options. It is the same verdict the Proof beside this Code carries, as
+	// a boolean for logs: a policy compares the Proof, and a Code with
+	// Trusted false never sits above ProofUnmet. Status says how it failed.
 	Trusted bool
 	// Status is the platform's verdict in its own words, always populated:
 	// "valid", "no signature", or the failing condition.
@@ -252,6 +258,18 @@ func (p *Peer) String() string {
 
 func (p *Peer) note(format string, a ...any) {
 	p.Notes = append(p.Notes, fmt.Sprintf(format, a...))
+}
+
+// recordCode attaches the platform's verdict about the peer's code: verified
+// code at the rung the transport's binding is worth, a verdict below ProofPID
+// with the platform's own wording as its reason.
+func (p *Peer) recordCode(code Code, verdict Proof, verifiedWhy string) {
+	if verdict >= ProofPID {
+		p.Code = attr("code", code, verdict, verifiedWhy)
+		return
+	}
+	p.Code = attr("code", code, verdict, code.Status)
+	p.note("code: %s; reported at %q, below every rung that implies verification", code.Status, verdict)
 }
 
 // Need is a policy: the minimum proof a service requires for each attribute

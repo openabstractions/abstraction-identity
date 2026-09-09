@@ -1,14 +1,24 @@
 # Contract
 
+Every rule this layer states, each carrying a tag, in the order they were
+decided. A conformance scenario cites the tag it tests on its `# expect` line,
+and a citation that resolves to no rule here is a defect in one of the two.
+The scenarios are in `testdata/scenarios/`; what they can and cannot reach is
+the last section of this page.
+
+[README.md](README.md) is the door — what this layer is, how to obtain it, one
+example that runs. No rule on that page carries a tag.
+
 What this package will and will not tell a service about the program on the
 other end of a local connection, and what a permission system built on it must
 therefore refuse to promise.
 
 Windows and Linux were checked by the tests in this repository — Windows 11 and
 Linux 6.18 — not taken from documentation. Where a test proves a claim, it is
-named. **macOS was written and reasoned about but never executed**; its section
-says so at the top, and "What was tested where" at the end of this document is
-the full list of what has and has not been run.
+named. **macOS has been executed on hardware** — the drift attack reproduced
+2026-09-05, the cgo file compiled and run 2026-09-08, its signature failure
+paths driven 2026-09-09 — and "What was tested where" at the end of this
+document is the full list of what has and has not been run.
 
 Three platforms, three different shapes of answer. The one-line summary, before
 the detail: Windows can tell you which program opened the connection and cannot
@@ -23,22 +33,99 @@ plain socket, cannot firmly bind that code to the connection.
 A `Peer` has five attributes — user, process, path, package, code — and each one
 carries a `Proof` saying how hard it would be to make it lie. There is no way to
 read a value without the proof; `Attr.AtLeast` returns an error instead of a
-value when the evidence is weaker than the caller demanded.
+value when the evidence is weaker than the caller demanded [ID-P3].
+
+The ladder is a total order, weakest first, and these nine names are the whole
+of it [ID-P1].
 
 | Proof | What it rests on |
 | --- | --- |
-| `none` | Nothing. There is no value. |
-| `claimed` | The peer said so. **This package never produces it.** |
-| `pid` | Read from a pid after the fact, without checking for reuse. |
-| `bound` | Read through something that ties the value to the process that connected: a process handle whose creation predates the connection (Windows), a pidfd the kernel derived from the connection itself (Linux), a pid and pidversion cross-checked against the connect-time credentials and the connection's start-time window (macOS). Each platform's section says exactly what its version of `bound` excludes and what it does not. |
-| `kernel` | The kernel stamped it on the connection when the peer connected. |
-| `signed` | The OS validated a code signature and this identity came out of it. |
+| `none` | Nothing. There is no value, and none is handed out however low a minimum the caller asks for [ID-P4]. |
+| `claimed` | The peer said so. **This package never produces it and has no API that accepts it** [ID-P2]. |
+| `invalid` | The platform found a signature and refused it: the code was modified after signing, the certificate is expired or revoked, or the chain reaches a root this machine does not trust. The lowest of the three verdicts below — no signature is no claim, and a refused signature is a claim the operating system rejected [ID-P9]. |
+| `unsigned` | The platform looked and found no signature at all. `Need{Code: ProofUnsigned}` says *I do not require a signature but I refuse a broken one*, a policy a service can honestly state; the reverse — accept tampered code but refuse unsigned code — is not one anybody can state, which is why `invalid` sits below it [ID-P10]. |
+| `unmet` | The signature is intact and the platform accepted it, but the code does not satisfy the requirement the service asked for in `Options.CodeRequirement`. The strongest of the three verdicts — intact code, signed by somebody other than who was required — and still carries no identity: nothing is read out of a signature that failed the check it was given [ID-P11]. |
+| `pid` | Read from a pid after the fact, without checking for reuse. Good enough for a log line, never for a permission decision [ID-P5]. |
+| `bound` | Read through something that ties the value to the process that connected: a process handle whose creation predates the connection (Windows), a pidfd the kernel derived from the connection itself (Linux), a pid and pidversion cross-checked against the connect-time credentials and the connection's start-time window (macOS). Each platform's section says exactly what its version of `bound` excludes and what it does not [ID-P6]. |
+| `kernel` | The kernel stamped it on the connection when the peer connected. A value the kernel produces honestly but resolves when asked is not of this kind [ID-P7]. |
+| `signed` | The OS validated a code signature and this identity came out of it, rather than out of a filename [ID-P8]. |
+
+`invalid`, `unsigned` and `unmet` are verdicts, not claims or bindings, and
+only `Code` ever produces them. They sit below `pid` and everything above it:
+from `pid` upward a rung says how a value was *bound* to the peer, and a
+verdict is not a binding of anything, so a policy that implies verification
+refuses all three by comparison alone. They sit above `claimed`: `claimed` is
+*the peer said so*, and a verdict is what the operating system said, which is
+always stronger than an unchecked assertion [ID-P12].
 
 `Ceiling()` reports the best each attribute can reach on the running platform,
-and `CanEver(need)` answers, at startup and without a connection, whether a
-policy is achievable here at all. A service whose model rests on a proof this
-operating system cannot produce should fail to start, not discover it once per
-connection.
+and it answers without a connection [ID-L1]. `CanEver(need)` compares a policy
+against that ceiling and is called once at startup, never per connection
+[ID-L2]. A service whose model rests on a proof this operating system cannot
+produce should fail to start, not discover it once per connection.
+
+A ceiling never reports `claimed` for any attribute [ID-L5], and `Stronger`
+names the transport that would prove more than this one, empty when this
+transport is already the platform's best [ID-L6].
+
+## A policy, and what `Check` answers
+
+A `Need` is a minimum proof per attribute. `Check` reports whether this peer
+meets it, and the error names **every** attribute that fell short rather than
+the first, so a service does not learn about its second impossible requirement
+only after fixing the first [ID-C1]. The zero `Need` requires nothing and is
+met by every peer [ID-C2]; an attribute the policy does not name is not judged,
+however weak it is [ID-C3].
+
+Nothing in a `Peer` was ever spoken by the peer. Two connections from one
+program carrying two different lies about who is calling resolve to the same
+identity, and no string from either payload appears anywhere in it [ID-N1].
+There is no field a caller can fill in from a request and no constructor that
+takes one; `ProofClaimed` exists only to name what is being refused [ID-N2].
+
+An identity is taken once, from the connection the service accepted, and
+afterwards refused rather than re-derived [ID-B1].
+
+### Answering weakly, and not answering at all
+
+These are different outcomes and the API keeps them apart. An answer that is
+merely weak comes back as a `Peer` with low proofs and a populated `Notes`,
+never as an error, because only the caller's policy knows whether weak is fatal
+[ID-E5]. An error means the channel cannot answer the question at all:
+
+- The handle is not the end the service accepted — the client end of a pipe, or
+  a listening socket. Both would answer, and both would answer about the
+  service itself, so both are refused with `ErrNotServerEnd` [ID-E1].
+- The peer is not on this machine: `ErrRemotePeer` [ID-E2].
+- The connection carries no peer credentials at all, or its handle cannot be
+  reached: `ErrUnsupportedConn` [ID-E3].
+- The platform has no implementation here. It returns `ErrUnimplemented`
+  instead of a weaker answer from a portable fallback, because a permission
+  system that silently degrades to "some process on this machine" is worse than
+  one that will not start [ID-E4].
+
+### A verdict is not a claim
+
+`Code.Trusted` is the platform's own trust verdict. A `Code` with `Trusted`
+false is a signature that exists and **failed**, and `Status` says how [ID-C5].
+
+**A policy that demands a code identity is not met by a signature the platform
+rejected [ID-C4].** `Check` compares proof levels, and a signature the
+platform examined and did not accept is reported at `invalid`, `unsigned` or
+`unmet` — below `ProofPID` and everything above it — so a service written
+exactly as README.md's example shows, with a `CodeRequirement` the peer fails
+and `Need{Code: ProofPID}`, is refused.
+
+When verification fails, `Code` is reported at the verdict's own rung, with
+`Trusted` false and `Status` naming exactly how, rather than withheld at
+`none` [ID-C6]. The failure stays readable in a log line, and a service that
+knowingly wants to admit an unverified caller asks for the lower rung by
+name — `Need{Code: ProofUnsigned}` admits the unsigned peer by saying so, not
+by omission. `testdata/scenarios/code-untrusted.txt` asserts [ID-C4] and is
+green. Its step 4 stays undecided here, not because the API is undecided —
+[ID-C6] settles that — but because the value itself is not one token across
+platforms: `unsigned` on Windows, `unmet` on macOS, `none` on Linux where
+`Code` never verifies at all.
 
 ---
 
@@ -88,7 +175,7 @@ So a service cannot authenticate before it accepts input. The order is forced:
 accept, read one bounded frame, identify, and only then decide what that frame
 was allowed to ask for. Do not parse the frame first, do not size a buffer from
 a length in it, and do not read a name out of it. The package returns
-`ErrMustReadFirst` if asked too early.
+`ErrMustReadFirst` if asked too early [ID-E6].
 
 ### Authenticode verifies a file, not a running program
 
@@ -107,8 +194,8 @@ been renamed away and a different file created at the name the kernel now
 reports. It needs write access to the directory and precise timing, and it
 cannot be closed from user mode.
 
-That is why `Code` never exceeds `bound`, and why `CanEver(Need{Code:
-ProofSigned})` fails on Windows. Asserted by
+That is why `Code` never exceeds `bound` on Windows, and why `CanEver(Need{Code:
+ProofSigned})` fails there [ID-W1]. Asserted by
 `TestWindowsRefusesToPromiseASignature`.
 
 ### A signature names a publisher, not a program
@@ -154,13 +241,14 @@ Two conditions on that:
 
 - **`Options.ConnectedAt` must be set** from the accept loop, on the line after
   accept returns. Left zero it defaults to the moment of resolution, which still
-  excludes reuse after that moment but not reuse between accept and resolution.
+  excludes reuse after that moment but not reuse between accept and resolution
+  [ID-B3].
 - **The comparison uses the wall clock.** A clock stepped backwards can cause a
   false refusal. Refusal is the safe direction, and no tolerance is added,
   because a tolerance is exactly the width of the hole.
 
 When the check fires, `Process.Recycled` is set and path, package and code are
-all reported as `none` with the reason attached. Asserted by
+all reported as `none` with the reason attached [ID-B2]. Asserted by
 `TestRecycledPIDIsRefused`. When the peer has already exited, the pid is still
 reported at `kernel` — it is a fact about the connection — but nothing is read
 out of it.
@@ -177,7 +265,8 @@ inventing a weaker answer.
 Unless the server passes `PIPE_REJECT_REMOTE_CLIENTS`, a pipe is reachable over
 SMB. A remote client has no pid on this machine and its token is a network logon
 that says nothing about which program is running. This package refuses such a
-peer with `ErrRemotePeer`, but the correct fix is in the server: pass the flag.
+peer with `ErrRemotePeer` [ID-E2], but the correct fix is in the server: pass the
+flag.
 
 ### Impersonation is a per-thread privilege escalation waiting to happen
 
@@ -190,7 +279,8 @@ The package runs every impersonation on its own goroutine, locked to its thread,
 and reverts on success, on error and on panic. If `RevertToSelf` *itself* fails
 there is no way to make that thread safe again: the goroutine exits without
 unlocking, which makes the Go runtime destroy the thread rather than return it
-to the pool, and the caller gets `ErrImpersonationStuck` instead of an identity.
+to the pool, and the caller gets `ErrImpersonationStuck` instead of an identity
+[ID-E7].
 Losing a thread is cheap. `TestImpersonationIsAlwaysReverted` drives all three
 paths and then probes threads from the runtime's pool for a leaked token; the
 probe cannot fail spuriously, but it samples rather than proves.
@@ -285,7 +375,7 @@ rather than assuming it: `/proc/self/fdinfo/<pidfd>` carries a `Pid:` line, and
 it is required to still name the peer both before and after the read.
 
 Without `SO_PEERPIDFD` the same read is `pid`, with a `why` naming the missing
-kernel feature. Both branches are asserted — `TestTheProofSaysWhetherThePidWasPinned`
+kernel feature [ID-U2]. Both branches are asserted — `TestTheProofSaysWhetherThePidWasPinned`
 on a kernel that has it, and `TestWithoutPidfdNothingFromProcIsBound`, which asks
 for an option number that does not exist in order to make a modern kernel behave
 like an old one.
@@ -298,7 +388,7 @@ not identified. Read the next section before writing a rule against one.
 server must complete a read before it may ask who the client is, everything above
 is available the instant `accept` returns. `TestIdentifiesBeforeAnythingIsRead`
 asserts it. A Linux service can refuse a caller without ever taking a byte from
-it.
+it [ID-U4].
 
 ---
 
@@ -364,13 +454,13 @@ unprivileged should test that case rather than discover it in production.
 `SO_PEERCRED` translates the pid into the reader's pid namespace and reports `0`
 when the peer is not visible in it — a peer in a container, for instance. This
 package refuses such a connection outright rather than reporting a principal
-with no process attached.
+with no process attached [ID-U3].
 
 ### There is no code signature, and there is not going to be one
 
 Linux has no per-connection verification of code signatures for ordinary ELF
 binaries. IMA and dm-verity exist and are not queryable this way on a normal
-desktop. **`Code` is `none` on Linux, permanently**, `CanEver(Need{Code: …})`
+desktop. **`Code` is `none` on Linux, permanently** [ID-U1], `CanEver(Need{Code: …})`
 fails for every level, and a permission model that needs a publisher name should
 not ship on Linux claiming to have one.
 
@@ -432,7 +522,7 @@ including the code signature — is answered about the other program. Spawn
 
 **VERIFIED FALSE ON HARDWARE, 2026-09-05.** The mitigation below does not
 hold, and macOS `process`, `path`, `package` and `code` over AF_UNIX are
-therefore capped at `pid`, not `bound`. `p_starttime` is set at fork and is
+therefore capped at `pid`, not `bound` [ID-X1]. `p_starttime` is set at fork and is
 NOT reset by exec, so an attacker forks a placeholder, connects, then execs any
 chosen binary into it -- one fork before connect, and the code signature then
 reads as whatever was exec'd. A connection from an ad-hoc-signed binary reported
@@ -487,7 +577,7 @@ It reports what the code *claims*. A team identifier read out of it without a
 successful `SecCodeCheckValidity` first is a string the peer wrote into its own
 binary. This package reads nothing out of the signing information until validity
 has returned `errSecSuccess`, and a failed verification carries no identifier,
-no subject and no path out of the function — only the verdict.
+no subject and no path out of the function — only the verdict [ID-X2].
 
 ### A signature still names a publisher, not a program
 
@@ -509,7 +599,8 @@ stamp and outlives the process it names.
 
 A macOS build with `CGO_ENABLED=0` cannot reach the Security framework.
 `Ceiling()` reports `code: none` in that build, with the reason, so a service
-whose policy needs a signature is refused at startup rather than per connection.
+whose policy needs a signature is refused at startup rather than per connection
+[ID-X4].
 Everything else on the platform still works.
 
 ---
@@ -525,7 +616,8 @@ Everything else on the platform still works.
 | best honest proof | `bound` | `signed` |
 
 This package speaks sockets. `ProofSigned` is therefore not reachable on macOS
-here, `CanEver(Need{Code: ProofSigned})` fails, and the failure names XPC. A
+here, `CanEver(Need{Code: ProofSigned})` fails, and the failure names XPC
+[ID-X3]. A
 service that genuinely needs a signed identity on macOS should move its
 transport, not raise its expectations of this one.
 
@@ -535,11 +627,11 @@ transport, not raise its expectations of this one.
 
 | | Windows (npipe) | macOS (unix) | Linux (unix) |
 | --- | --- | --- | --- |
-| user | `kernel` | `kernel` | `kernel` |
+| user | `kernel` | `kernel` | `kernel` — every platform, which is why a policy about the principal is the one that ports [ID-L3] |
 | process | `kernel` | `bound` | `kernel` |
 | path | `bound` | `bound` | `bound` with `SO_PEERPIDFD`, else `pid` |
 | package | `signed` (MSIX) | `bound` (bundle id) | `bound` / `pid` (sandbox id, advisory) |
-| code | `bound` (Authenticode) | `bound` (Security framework) | `none` |
+| code | `bound` (Authenticode) | `bound` (Security framework) | `none` — no transport this package speaks reaches `signed` for an ordinary program, on any platform [ID-L4] |
 | identify before reading | no | yes | yes |
 | identity survives the peer | pid only | user only | user and pid |
 
@@ -607,6 +699,45 @@ available — the MSIX package name or signer subject *and* issuer on Windows, t
 team identifier and a code requirement on macOS, the LSM profile on Linux — and
 re-checked on every connection, never once at grant time. A path is a name, and
 the file behind it can be replaced by anyone who can write to it.
+
+---
+
+## What a conformance run can reach
+
+Identity is platform-furnished — a Windows named pipe, a Unix socket bind — so a
+scenario here is not the shape of a download replay. Three tiers, and which tier
+a rule is in is a fact about the rule, not a plan:
+
+**Reachable by a driver alone**, needing nothing but the machine it runs on.
+Seventeen rules, six scenarios in `testdata/scenarios/`: the ladder and
+`Attr.AtLeast`, `Ceiling` and `CanEver`, `Check`, the claim that never lands,
+the wrong end of the connection, a weak answer that is not an error, and the
+code the platform refused.
+
+**Needs an adversary that does not exist.** Every binding rule asserts what
+happens when a *hostile* peer does something an honest one never does: hand a
+connected socket to another program, fork a placeholder before connecting and
+exec into it afterwards, exit and let its pid be recycled. A driver can fork an
+honest peer; it cannot produce those without a purpose-built adversary binary
+per platform. The Go tests in `bind_attack_*_test.go` are that adversary, in one
+language. Until the same adversary exists as a fixture the suite can drive, the
+binding rules — `ID-B1`, `ID-B2`, `ID-B3`, and the macOS drift `ID-X1` — are
+**UNPROVEN** across languages, and a run that omits them says so.
+
+**Only measurable on a platform**, and no fixture closes the gap. MSIX package
+identity at `signed` needs a packaged application; a Developer ID team
+identifier needs a certificate and a console session to unlock it; `ID-U2` needs
+two kernels, one with `SO_PEERPIDFD` and one without; `ID-U4` needs an LSM
+enforcing; `ID-E2` needs a peer over SMB; `ID-E7` needs `RevertToSelf` to fail.
+Each is **UNPROVEN** by name until somebody runs it there.
+
+The shared runner cannot judge any of this yet. `conformance/DRIVER.md` closes
+the capability set to four job and download tokens, and `run.sh` classifies
+every operation it does not recognise as needing a job store, so an identity
+scenario is reported **unreachable** — the honest answer, and not a pass. What
+these scenarios need from that page is a fifth capability token, four verdicts
+(`unproven`, `no-answer`, `differs`, `unimplemented`) and the operations the
+scenario files use.
 
 ---
 

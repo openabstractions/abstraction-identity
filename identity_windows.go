@@ -173,17 +173,13 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 	case !p.Path.Known():
 		p.Code = unknown[Code]("code", "there is no image path to verify")
 	default:
-		code, why, err := verifyImage(proc, imagePath, opts)
+		code, verdict, err := verifyImage(proc, imagePath, opts)
 		if err != nil {
-			p.Code = unknown[Code]("code", "verification failed: "+err.Error())
+			p.Code = unknown[Code]("code", "verification could not be performed: "+err.Error())
 			p.note("code: %v", err)
 			break
 		}
-		bound := "Authenticode verified the file at the peer's image path, not the image the peer is executing; Windows cannot verify the latter"
-		p.Code = attr("code", code, ProofBound, joinWhy(why, bound))
-		if !code.Trusted {
-			p.note("code: %s", code.Status)
-		}
+		p.recordCode(code, verdict, "Authenticode verified the file at the peer's image path, not the image the peer is executing; Windows cannot verify the latter")
 	}
 
 	return p, nil

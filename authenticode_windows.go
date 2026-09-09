@@ -33,10 +33,10 @@ import (
 // renamed away and a different file put at the name the kernel now reports. It
 // requires write access to the directory and precise timing. It is the reason
 // Code never reports better than ProofBound. See CONTRACT.md.
-func verifyImage(proc windows.Handle, imagePath string, opts *Options) (Code, string, error) {
+func verifyImage(proc windows.Handle, imagePath string, opts *Options) (Code, Proof, error) {
 	pathW, err := windows.UTF16PtrFromString(imagePath)
 	if err != nil {
-		return Code{}, "", err
+		return Code{}, ProofNone, err
 	}
 
 	// FILE_SHARE_DELETE is deliberate: without it this open would block a
@@ -47,11 +47,11 @@ func verifyImage(proc windows.Handle, imagePath string, opts *Options) (Code, st
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
-		return Code{Status: "image file could not be opened: " + err.Error()}, "", nil
+		return Code{}, ProofNone, fmt.Errorf("the image file could not be opened: %w", err)
 	}
 	defer windows.CloseHandle(file)
 
-	code := verifyTrust(file, pathW, opts.checkRevocation())
+	code, verdict := verifyTrust(file, pathW, opts.checkRevocation())
 	if code.Trusted {
 		if subject, issuer, err := signerName(pathW); err == nil {
 			code.Subject, code.Issuer = subject, issuer
@@ -67,9 +67,9 @@ func verifyImage(proc windows.Handle, imagePath string, opts *Options) (Code, st
 	// Everything above happened over a span. Check that the span did not
 	// contain a swap.
 	if err := stillSameImage(proc, file, imagePath); err != nil {
-		return Code{Status: "verification abandoned: " + err.Error()}, "", nil
+		return Code{}, ProofNone, fmt.Errorf("verification abandoned: %w", err)
 	}
-	return code, "", nil
+	return code, verdict, nil
 }
 
 // stillSameImage re-asks the kernel where the process is running from, and
@@ -96,7 +96,9 @@ func stillSameImage(proc, file windows.Handle, want string) error {
 }
 
 // verifyTrust runs the Authenticode policy over an already-open file handle.
-func verifyTrust(file windows.Handle, pathW *uint16, revocation bool) Code {
+// The Proof is the verdict: ProofBound for a file Windows accepted, one of the
+// verdict rungs for one it did not.
+func verifyTrust(file windows.Handle, pathW *uint16, revocation bool) (Code, Proof) {
 	fi := windows.WinTrustFileInfo{
 		Size:     uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})),
 		FilePath: pathW,
@@ -112,12 +114,18 @@ func verifyTrust(file windows.Handle, pathW *uint16, revocation bool) Code {
 		// Cache-only URL retrieval keeps identification off the network.
 		// A permission prompt that hangs waiting for a CRL is a permission
 		// prompt that gets clicked through.
-		ProvFlags: windows.WTD_SAFER_FLAG | windows.WTD_CACHE_ONLY_URL_RETRIEVAL,
+		//
+		// WTD_SAFER_FLAG is deliberately absent. Under it Windows reports
+		// a signature it refused as TRUST_E_NOSIGNATURE, in the return
+		// value and in GetLastError alike - measured on Windows 11 with a
+		// signed node.exe one byte changed - so a tampered file and an
+		// unsigned one would land on the same rung.
+		ProvFlags: windows.WTD_CACHE_ONLY_URL_RETRIEVAL,
 		UIContext: windows.WTD_UICONTEXT_EXECUTE,
 	}
 	if revocation {
 		data.RevocationChecks = windows.WTD_REVOKE_WHOLECHAIN
-		data.ProvFlags = windows.WTD_SAFER_FLAG | windows.WTD_REVOCATION_CHECK_CHAIN
+		data.ProvFlags = windows.WTD_REVOCATION_CHECK_CHAIN
 	}
 
 	action := windows.WINTRUST_ACTION_GENERIC_VERIFY_V2
@@ -129,37 +137,43 @@ func verifyTrust(file windows.Handle, pathW *uint16, revocation bool) Code {
 	windows.WinVerifyTrustEx(windows.InvalidHWND, &action, &data)
 
 	if err == nil {
-		return Code{Trusted: true, Status: "valid"}
+		return Code{Trusted: true, Status: "valid"}, ProofBound
 	}
-	return Code{Trusted: false, Status: trustStatus(err)}
+	status, verdict := trustVerdict(err)
+	return Code{Status: status}, verdict
 }
 
-func trustStatus(err error) string {
+// trustVerdict words a WinVerifyTrust refusal and places it on the ladder. A
+// file that carries no signature, or is of a kind that cannot carry one, is
+// unsigned; every signature Windows found and refused is invalid, whether the
+// bytes changed or the chain failed. Windows has no requirement language, so
+// ProofUnmet is never produced here.
+func trustVerdict(err error) (string, Proof) {
 	var code uintptr
 	if e, ok := err.(syscall.Errno); ok {
 		code = uintptr(e)
 	}
 	switch code {
 	case trustENoSignature, cryptENotFound:
-		return "no signature"
+		return "no signature", ProofUnsigned
 	case trustESubjectFormUnknown:
-		return "the file is not of a form Authenticode can sign"
+		return "the file is not of a form Authenticode can sign", ProofUnsigned
 	case trustEProviderUnknown:
-		return "no trust provider for this file type"
+		return "no trust provider for this file type", ProofUnsigned
 	case trustEBadDigest:
-		return "signed, but the file has been modified since it was signed"
+		return "signed, but the file has been modified since it was signed", ProofInvalid
 	case certEUntrustedRoot, certEUntrustedTestRoot:
-		return "signed by a certificate chaining to a root this machine does not trust"
+		return "signed by a certificate chaining to a root this machine does not trust", ProofInvalid
 	case certEExpired:
-		return "signed by an expired certificate"
+		return "signed by an expired certificate", ProofInvalid
 	case certERevoked:
-		return "signed by a revoked certificate"
+		return "signed by a revoked certificate", ProofInvalid
 	case certEChaining:
-		return "signed, but the certificate chain could not be built"
+		return "signed, but the certificate chain could not be built", ProofInvalid
 	case cryptERevocationOffline:
-		return "revocation status could not be checked"
+		return "revocation status could not be checked", ProofInvalid
 	}
-	return "not trusted: " + err.Error()
+	return "not trusted: " + err.Error(), ProofInvalid
 }
 
 // signerName pulls the subject and issuer of the signing certificate out of

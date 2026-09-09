@@ -20,6 +20,6 @@ var errNoCgo = errors.New("identity: " + whyNoCgo)
 
 func codeCeiling() (Proof, string) { return ProofNone, whyNoCgo }
 
-func verifyAuditToken(token auditToken, opts *Options) (Code, string, string, error) {
-	return Code{Status: whyNoCgo}, "", "", errNoCgo
+func verifyAuditToken(token auditToken, opts *Options) (Code, Proof, string, string, error) {
+	return Code{Status: whyNoCgo}, ProofNone, "", "", errNoCgo
 }

@@ -34,7 +34,7 @@ something weaker.
 | word | meaning |
 |---|---|
 | **peer** | the program on the other end: five attributes, each with a proof |
-| **proof** | how hard the value would be to fake, weakest first: `none`, `claimed`, `pid`, `bound`, `kernel`, `signed` |
+| **proof** | how hard the value would be to fake, weakest first: `none`, `claimed`, `invalid`, `unsigned`, `unmet`, `pid`, `bound`, `kernel`, `signed` — three are verdicts, not claims; [CONTRACT.md](CONTRACT.md) says why they sit where they do |
 | **claimed** | *the peer said so*; this package never produces it and has no API that accepts it |
 | **bound** | read through something that ties the value to the process that connected, so no successor can take its place |
 | **ceiling** | the best each attribute can reach on the running platform, known before any connection exists |
@@ -75,11 +75,14 @@ There is no way to read a value without being handed its proof at the same time:
 path, err := peer.Path.AtLeast(identity.ProofBound) // err, and no value, if weaker
 ```
 
-The ladder, weakest first: `none`, `claimed`, `pid`, `bound`, `kernel`,
-`signed`. `claimed` means *the peer said so* — **this package never produces
-it**, and has no API that accepts it. It exists so that a service tempted to
-read an `owner` field out of the request payload has somewhere to look and be
-told no.
+The ladder, weakest first: `none`, `claimed`, `invalid`, `unsigned`, `unmet`,
+`pid`, `bound`, `kernel`, `signed`. `claimed` means *the peer said so* — **this
+package never produces it**, and has no API that accepts it. It exists so that
+a service tempted to read an `owner` field out of the request payload has
+somewhere to look and be told no. `invalid`, `unsigned` and `unmet` are
+verdicts, not claims: the platform examined a signature and did not accept it,
+and only `Code` ever lands on them. [CONTRACT.md](CONTRACT.md) says why they
+sit below `pid` and in that order among themselves.
 
 ## Ask before you serve, not per connection
 

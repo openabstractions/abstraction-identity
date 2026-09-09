@@ -62,12 +62,18 @@ static void ai_status(OSStatus st, char *out, int outlen) {
 	CFRelease(s);
 }
 
+// Where ai_verify stopped. Only ai_stageValidity is a verdict about the peer;
+// the two before it mean no verdict was reached, and the one after it means
+// the code passed.
+enum { ai_stageGuest = 1, ai_stageRequirement, ai_stageValidity, ai_stageValid };
+
 // ai_verify validates the code identified by an audit token and, only if that
 // succeeds, reports what the validated signature says.
 //
-// Returns the OSStatus of the validity check. Every out buffer is left empty on
-// any failing path.
+// Returns the OSStatus of the step named in *stage. Every out buffer is left
+// empty on any failing path.
 static OSStatus ai_verify(const void *token, int tokenlen, const char *requirement,
+                          int *stage,
                           char *ident, int identlen,
                           char *team, int teamlen,
                           char *subject, int subjectlen,
@@ -75,6 +81,7 @@ static OSStatus ai_verify(const void *token, int tokenlen, const char *requireme
                           char *path, int pathlen,
                           char *status, int statuslen) {
 	ident[0] = team[0] = subject[0] = issuer[0] = path[0] = status[0] = '\0';
+	*stage = ai_stageGuest;
 
 	CFDataRef data = CFDataCreate(NULL, (const UInt8 *)token, (CFIndex)tokenlen);
 	if (data == NULL) {
@@ -101,6 +108,7 @@ static OSStatus ai_verify(const void *token, int tokenlen, const char *requireme
 
 	SecRequirementRef req = NULL;
 	if (requirement != NULL && requirement[0] != '\0') {
+		*stage = ai_stageRequirement;
 		CFStringRef rs = CFStringCreateWithCString(NULL, requirement, kCFStringEncodingUTF8);
 		if (rs == NULL) {
 			CFRelease(code);
@@ -117,6 +125,7 @@ static OSStatus ai_verify(const void *token, int tokenlen, const char *requireme
 	}
 
 	// The verification. Nothing below runs unless this succeeds.
+	*stage = ai_stageValidity;
 	st = SecCodeCheckValidity(code, kSecCSDefaultFlags, req);
 	if (req != NULL) {
 		CFRelease(req);
@@ -126,6 +135,7 @@ static OSStatus ai_verify(const void *token, int tokenlen, const char *requireme
 		CFRelease(code);
 		return st;
 	}
+	*stage = ai_stageValid;
 	snprintf(status, statuslen, "valid");
 
 	CFDictionaryRef info = NULL;
@@ -171,16 +181,23 @@ static OSStatus ai_verify(const void *token, int tokenlen, const char *requireme
 */
 import "C"
 
-import "unsafe"
+import (
+	"errors"
+	"fmt"
+	"unsafe"
+)
 
 func codeCeiling() (Proof, string) {
 	return ProofBound, "the Security framework validates the signature of running code selected by audit token, which is more than Windows can do for an unpackaged program - but over a unix socket the token only names the process the socket currently points at, so the answer is worth what that binding is worth; " + whyNoXPC
 }
 
 // verifyAuditToken validates the code the token names and reports what the
-// validated signature says. The second result is the signing identifier (the
-// bundle id for an application), the third the path of the verified code.
-func verifyAuditToken(token auditToken, opts *Options) (Code, string, string, error) {
+// validated signature says. The Proof is the verdict: ProofBound for code the
+// framework accepted, before the transport caps it, and one of the three
+// verdict rungs for code it did not. The strings are the signing identifier
+// (the bundle id for an application) and the path of the verified code, both
+// empty unless the code was accepted. An error means no verdict was reached.
+func verifyAuditToken(token auditToken, opts *Options) (Code, Proof, string, string, error) {
 	var (
 		ident   [256]C.char
 		team    [64]C.char
@@ -188,6 +205,7 @@ func verifyAuditToken(token auditToken, opts *Options) (Code, string, string, er
 		issuer  [512]C.char
 		path    [1024]C.char
 		status  [512]C.char
+		stage   C.int
 	)
 
 	var req *C.char
@@ -198,7 +216,7 @@ func verifyAuditToken(token auditToken, opts *Options) (Code, string, string, er
 
 	tok := token // addressable copy; the token is 32 bytes of plain data
 	st := C.ai_verify(
-		unsafe.Pointer(&tok[0]), C.int(unsafe.Sizeof(tok)), req,
+		unsafe.Pointer(&tok[0]), C.int(unsafe.Sizeof(tok)), req, &stage,
 		&ident[0], C.int(len(ident)),
 		&team[0], C.int(len(team)),
 		&subject[0], C.int(len(subject)),
@@ -212,22 +230,42 @@ func verifyAuditToken(token auditToken, opts *Options) (Code, string, string, er
 		Issuer:  C.GoString(&issuer[0]),
 		TeamID:  C.GoString(&team[0]),
 		Status:  C.GoString(&status[0]),
-		Trusted: st == 0, // errSecSuccess
+		Trusted: stage == C.ai_stageValid,
 	}
 	if code.Status == "" {
 		code.Status = "no verdict"
 	}
-	if !code.Trusted {
+	switch stage {
+	case C.ai_stageGuest:
+		return code, ProofNone, "", "", errors.New(code.Status)
+	case C.ai_stageRequirement:
+		return code, ProofNone, "", "", fmt.Errorf("the code requirement %q is the service's own and could not be compiled: %s", opts.codeRequirement(), code.Status)
+	case C.ai_stageValidity:
 		// A failed check is an answer, not an error: unsigned, expired
 		// and tampered-with are all things a service needs to be told,
 		// and none of them may carry an identifier or a path out of this
 		// function.
-		return code, "", "", nil
+		return code, verdictOf(st), "", "", nil
 	}
 	if code.Subject == "" && code.TeamID != "" {
 		// Platform binaries validate against the system's own anchor and
 		// carry no leaf certificate to name.
 		code.Subject = "team " + code.TeamID
 	}
-	return code, C.GoString(&ident[0]), C.GoString(&path[0]), nil
+	return code, ProofBound, C.GoString(&ident[0]), C.GoString(&path[0]), nil
+}
+
+// verdictOf places a failed SecCodeCheckValidity on the ladder. Only two
+// statuses are told apart by name: unsigned code, and intact code that failed
+// the requirement it was given. Everything else the framework refuses -
+// modified code, a bad or unsupported signature, a revoked chain - is a
+// signature it rejected.
+func verdictOf(st C.OSStatus) Proof {
+	switch st {
+	case C.errSecCSUnsigned:
+		return ProofUnsigned
+	case C.errSecCSReqFailed:
+		return ProofUnmet
+	}
+	return ProofInvalid
 }

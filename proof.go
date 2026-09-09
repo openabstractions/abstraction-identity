@@ -10,6 +10,13 @@ import (
 // minimum, but the steps are qualitatively different, and the documentation of
 // each one says what it actually rests on. Read those before writing a policy;
 // the number alone is not the argument.
+//
+// From ProofPID upwards a rung says how the value was bound to the peer. The
+// three rungs below it are verdicts, produced only for Code: the platform
+// examined the peer's signature and did not accept it, and the rung says how
+// far it got. They sit below every rung that implies verification, so a policy
+// that requires a verified signature refuses them by comparison alone, and a
+// policy that knowingly admits an unverified caller names the lower rung.
 type Proof uint8
 
 const (
@@ -24,6 +31,27 @@ const (
 	// being refused, so a service tempted to read an "owner" field out of
 	// the request payload has somewhere to look and be told no.
 	ProofClaimed
+
+	// ProofInvalid means the platform found a signature and refused it: the
+	// code was modified after signing, the certificate is expired or revoked,
+	// or the chain reaches a root this machine does not trust. It is the
+	// lowest verdict, below ProofUnsigned, because no signature is no claim
+	// and a refused signature is a claim the operating system rejected. The
+	// value carries the platform's wording in Code.Status and no identity.
+	ProofInvalid
+
+	// ProofUnsigned means the platform looked and found no signature at all.
+	// A policy that admits unsigned callers asks for this rung by name.
+	ProofUnsigned
+
+	// ProofUnmet means the signature is intact and the platform accepted it,
+	// but the code does not satisfy the requirement the service asked for in
+	// Options.CodeRequirement. It is the strongest verdict short of
+	// verification: intact code, signed by somebody other than who was
+	// required. Nothing is read out of a signature that failed the check it
+	// was given, so the value still carries no identity. Only macOS produces
+	// it; Windows has no requirement language.
+	ProofUnmet
 
 	// ProofPID means the attribute was read out of the operating system by
 	// process id, after the connection was already up, without checking that
@@ -89,7 +117,7 @@ const (
 	ProofSigned
 )
 
-var proofNames = [...]string{"none", "claimed", "pid", "bound", "kernel", "signed"}
+var proofNames = [...]string{"none", "claimed", "invalid", "unsigned", "unmet", "pid", "bound", "kernel", "signed"}
 
 func (p Proof) String() string {
 	if int(p) < len(proofNames) {

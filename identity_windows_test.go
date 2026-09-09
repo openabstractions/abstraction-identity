@@ -333,11 +333,14 @@ func TestCodeSignatureOfASignedBinary(t *testing.T) {
 	// file against the process it was given, so use a process whose image
 	// really is the file. This test therefore uses the test binary, which
 	// is unsigned, plus a direct check of a signed system file.
-	code, _, err := verifyImage(self, mustExe(t), nil)
+	code, verdict, err := verifyImage(self, mustExe(t), nil)
 	if err != nil {
 		t.Fatalf("verifyImage: %v", err)
 	}
-	t.Logf("test binary: trusted=%v status=%q subject=%q", code.Trusted, code.Status, code.Subject)
+	t.Logf("test binary: verdict=%s trusted=%v status=%q subject=%q", verdict, code.Trusted, code.Status, code.Subject)
+	if code.Trusted != (verdict >= ProofPID) {
+		t.Errorf("verdict %s and Trusted=%v disagree; the rung is the verdict", verdict, code.Trusted)
+	}
 
 	// Something Windows signed itself, to show the verifier reaching a
 	// verdict of "valid" and not only failures.
@@ -354,10 +357,10 @@ func TestCodeSignatureOfASignedBinary(t *testing.T) {
 	}
 	defer windows.CloseHandle(f)
 
-	c := verifyTrust(f, p, false)
-	t.Logf("%s: trusted=%v status=%q", signed, c.Trusted, c.Status)
-	if !c.Trusted {
-		t.Errorf("Windows does not trust its own %s: %q", signed, c.Status)
+	c, verdict := verifyTrust(f, p, false)
+	t.Logf("%s: verdict=%s trusted=%v status=%q", signed, verdict, c.Trusted, c.Status)
+	if !c.Trusted || verdict != ProofBound {
+		t.Errorf("Windows does not trust its own %s: %s %q", signed, verdict, c.Status)
 	}
 	// Its signature lives in a system catalog, not in the file, so the
 	// publisher name is not extractable from the file itself. That is worth

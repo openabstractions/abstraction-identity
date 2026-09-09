@@ -155,7 +155,7 @@ func peerUser(pipe windows.Handle) (User, string, error) {
 		why = "the SID has no resolvable account name (" + err.Error() + "); the SID itself is unaffected"
 	}
 	if level == windows.SecurityIdentification {
-		why = joinWhy(why, "the client granted only SECURITY_IDENTIFICATION, which is enough to read this identity but not to act as it")
+		why = joinWhy(why, "the client granted SECURITY_IDENTIFICATION, which is the level this identity is read at")
 	}
 	return user, why, nil
 }

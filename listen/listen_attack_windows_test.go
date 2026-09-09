@@ -39,6 +39,9 @@ func TestMain(m *testing.M) {
 	if name := os.Getenv(attackEnv); name != "" {
 		os.Exit(runAttacker(name, os.Getenv(attackMode)))
 	}
+	if name := os.Getenv(serverEnv); name != "" {
+		os.Exit(runServer(name))
+	}
 	os.Exit(m.Run())
 }
 

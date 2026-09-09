@@ -3,6 +3,7 @@ package listen
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"sync"
@@ -196,18 +197,33 @@ func (l *pipeListener) Close() error {
 	return syscall.CloseHandle(l.waiting)
 }
 
+// identifyOnly is the authority this side hands the server it reaches.
+// CreateFile with no quality of service defaults a named-pipe client to
+// SecurityImpersonation, so the server may act as this process - open its
+// files, reach the network as it - from the instant the handle opens, before
+// this side has learned anything about who answered. Ordering is the whole
+// problem: a client cannot verify first and grant afterwards.
+// SECURITY_IDENTIFICATION is what a server needs to read this caller's
+// identity and one level below what lets it wear that identity, and reading
+// identity is all this layer's servers do.
+const identifyOnly = windows.SECURITY_SQOS_PRESENT | windows.SECURITY_IDENTIFICATION
+
 func Dial(name string) (net.Conn, error) {
+	n, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+	}
 	for {
-		f, err := os.OpenFile(name, os.O_RDWR, 0)
+		h, err := windows.CreateFile(n, windows.GENERIC_READ|windows.GENERIC_WRITE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, identifyOnly, 0)
 		if err == nil {
-			return fileConn{f}, nil
+			return fileConn{os.NewFile(uintptr(h), name)}, nil
 		}
 		if !errors.Is(err, errPipeBusy) {
-			return nil, err
+			return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 		}
-		n, _ := syscall.UTF16PtrFromString(name)
 		if r, _, err := waitNamedPipe.Call(uintptr(unsafe.Pointer(n)), busyWait); r == 0 {
-			return nil, err
+			return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 		}
 	}
 }

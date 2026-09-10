@@ -1,0 +1,94 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '13 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  go:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      # The macOS arm64 image carries Go in the tool cache only, so it is on
+      # PATH on ubuntu and windows and absent here until an action places it.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: state
+        run: |
+          printf 'a hosted runner, %s logical CPUs, %s %s, on mains\n' \
+            "$(getconf _NPROCESSORS_ONLN)" "$RUNNER_OS" "$RUNNER_ARCH"
+          go version
+          go env CGO_ENABLED CC GOTOOLCHAIN GOFLAGS
+
+      # No go.work here on purpose. The requires resolve from the module proxy
+      # at the versions this repository pins, which is the only route a
+      # stranger has.
+      - name: build and test
+        run: |
+          go build ./...
+          n=$(go list -f '{{if .TestGoFiles}}x{{end}}' ./... | grep -c x || true)
+          if [ "$n" -lt 1 ]; then
+            printf 'FAIL  no package in this module has a test file, and go test calls that a pass\n'
+            exit 1
+          fi
+          go test -count=1 ./...
+          printf '%s: %s, %s go packages with tests, resolved as an adopter resolves them\n' \
+            "$RUNNER_OS" "$GITHUB_REPOSITORY" "$n" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: race
+        run: |
+          if [ "$(go env CGO_ENABLED)" != "1" ]; then
+            printf 'UNPROVEN  race detector — CGO_ENABLED=0, no C compiler for go env CC=%s\n' "$(go env CC)"
+            printf '%s: UNPROVEN race detector, CGO_ENABLED=0\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          go test -race -count=1 ./...
+          printf '%s: under the race detector\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
+
+      # checkptr is the half of -race that needs no C compiler, and it is the
+      # half this layer needs: the Windows code reads SIDs out of buffers the
+      # kernel filled, and reading one wrong is a fatal error rather than a
+      # wrong answer. A runner with CGO_ENABLED=0 skips the step above and
+      # would otherwise report a green nobody measured.
+      - name: checkptr
+        run: |
+          go test -count=1 -gcflags=all=-d=checkptr=1 ./...
+          printf '%s: under checkptr\n' "$RUNNER_OS" >> "$GITHUB_STEP_SUMMARY"
+
+  unproven:
+    needs: [go]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: what this workflow did not run
+        run: |
+          {
+            printf '\n### UNPROVEN\n\nThis workflow builds what this repository contains, and nothing else. It ran none of:\n\n'
+            printf -- '- probe/, the darwin+cgo command under this repository. It is built by hand on real hardware and its evidence is probe-evidence.txt; nothing here compiles it\n'
+            printf -- '- the cross-language conformance harnesses, which compare bytes across languages and live in the private tree\n'
+            printf -- '- any code signing. The macOS answers this layer gives depend on a Developer ID and a real login session; a hosted runner has neither\n'
+            printf -- '- any consumer. abstraction-download and abstraction-job pin this module by version, and this says nothing about the version they pin\n'
+          } >> "$GITHUB_STEP_SUMMARY"

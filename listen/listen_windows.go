@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	identity "github.com/openabstractions/abstraction-identity"
+	"github.com/openabstractions/abstraction-identity/internal/integrity"
 	"golang.org/x/sys/windows"
 )
 
@@ -105,20 +106,7 @@ func ownAccountOnly() (*windows.SecurityAttributes, error) {
 // name, so a service running lower than medium labels at its own level instead
 // of failing with the wrong sentence.
 func ourLabel(tok windows.Token) string {
-	var n uint32
-	windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, nil, 0, &n)
-	if n == 0 {
-		return "ME"
-	}
-	buf := make([]byte, n)
-	if err := windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, &buf[0], n, &n); err != nil {
-		return "ME"
-	}
-	sid := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buf[0])).Label.Sid
-	if sid == nil || sid.SubAuthorityCount() == 0 {
-		return "ME"
-	}
-	if sid.SubAuthority(uint32(sid.SubAuthorityCount())-1) < integrityMedium {
+	if rid, ok := integrity.RID(tok); ok && rid < integrityMedium {
 		return "LW"
 	}
 	return "ME"

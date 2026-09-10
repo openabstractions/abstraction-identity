@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"unsafe"
 
+	"github.com/openabstractions/abstraction-identity/internal/integrity"
 	"golang.org/x/sys/windows"
 )
 
@@ -164,21 +165,8 @@ func peerUser(pipe windows.Handle) (User, string, error) {
 // costs a display detail, not the identity, so it returns 0 rather than an
 // error.
 func tokenIntegrityRID(tok windows.Token) uint32 {
-	var n uint32
-	windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, nil, 0, &n)
-	if n == 0 {
-		return 0
-	}
-	buf := make([]byte, n)
-	if err := windows.GetTokenInformation(tok, windows.TokenIntegrityLevel, &buf[0], n, &n); err != nil {
-		return 0
-	}
-	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buf[0]))
-	sid := label.Label.Sid
-	if sid == nil || sid.SubAuthorityCount() == 0 {
-		return 0
-	}
-	return sid.SubAuthority(uint32(sid.SubAuthorityCount()) - 1)
+	rid, _ := integrity.RID(tok)
+	return rid
 }
 
 // Mandatory integrity levels, as RIDs of the label SID.

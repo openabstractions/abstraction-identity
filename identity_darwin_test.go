@@ -194,8 +194,8 @@ func TestAuditTokenMustAgreeWithTheConnectTimeCredentials(t *testing.T) {
 // The ProofBound half was measured before it was believed: a helper forked
 // before the connection and exec'ing /bin/cat after it satisfies every
 // start-time check this package has, and is handed Apple's signature. See
-// bind_attack_darwin_test.go, which runs that attack, and
-// research/darwin-verification/probe-evidence.txt experiments 2 and 7.
+// bind_attack_darwin_test.go, which runs that attack, and probe-evidence.txt
+// experiments 2 and 7.
 func TestDarwinRefusesToPromiseASignature(t *testing.T) {
 	err := CanEver(Need{Code: ProofSigned})
 	if err == nil {

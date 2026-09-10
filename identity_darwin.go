@@ -50,8 +50,8 @@ package identity
 // 405ms before the connection and exec'ing /bin/cat after it defeats all three
 // checks, because p_starttime survives exec. So nothing derived from the peer's
 // pid is reported above ProofPID on this transport - including the code
-// signature, however good the signature is. See
-// research/darwin-verification/probe-evidence.txt, experiments 2 and 7.
+// signature, however good the signature is. See probe-evidence.txt,
+// experiments 2 and 7.
 //
 // [Bind] narrows it further, by taking the token before the service reads and
 // refusing every later change, and bind_darwin.go states exactly how much that

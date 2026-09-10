@@ -14,7 +14,7 @@ import (
 func execPathOf(pid int) (string, error) { return processExecPath(pid) }
 
 // TestAPreForkedHelperStealsTheSignatureAndTheBindingRefusesIt is experiment 2
-// of research/darwin-verification/probe-evidence.txt, turned into a test that
+// of probe-evidence.txt, turned into a test that
 // runs on every build, plus the half that was missing: what a binding taken at
 // accept does about it.
 //

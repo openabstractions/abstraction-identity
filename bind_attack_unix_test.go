@@ -13,8 +13,8 @@ package identity
 // On macOS the peer is whoever wrote last, so the attack does not need to touch
 // the connecting process at all: a second process that already existed writes
 // one byte and inherits the whole answer, signature included. That is
-// preForkedHelper, and it is the shape measured in
-// research/darwin-verification/probe-evidence.txt experiment 2.
+// preForkedHelper, and it is the shape measured in probe-evidence.txt
+// experiment 2.
 
 import (
 	"net"

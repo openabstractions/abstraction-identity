@@ -220,10 +220,6 @@ The replace is relative to probe/, so .. names a sibling
 of probe/ inside the repo. The repo root is one level up and is spelt "..".
 Fixed here to "..", and go.sum added. Both verified: build and vet clean.
 
-The replace path is therefore correct for where this file is published and
-wrong where it is stored -- research/darwin-verification/.. is research/,
-which holds no module. It cannot be right in both places.
-
 Neither fault was catchable by the release plan's own check: probe/ carries
 its own go.mod, so `go build ./...` at the repo root never descends into it.
 Nothing reaches the module proxy either way -- the root module's zip excludes

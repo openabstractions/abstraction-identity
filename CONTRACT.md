@@ -121,9 +121,9 @@ When verification fails, `Code` is reported at the verdict's own rung, with
 `none` [ID-C6]. The failure stays readable in a log line, and a service that
 knowingly wants to admit an unverified caller asks for the lower rung by
 name — `Need{Code: ProofUnsigned}` admits the unsigned peer by saying so, not
-by omission. `testdata/scenarios/code-untrusted.txt` asserts [ID-C4] and is
+by omission. `testdata/scenarios/code-untrusted.txt` asserts `ID-C4` and is
 green. Its step 4 stays undecided here, not because the API is undecided —
-[ID-C6] settles that — but because the value itself is not one token across
+`ID-C6` settles that — but because the value itself is not one token across
 platforms: `unsigned` on Windows, `unmet` on macOS, `none` on Linux where
 `Code` never verifies at all.
 
@@ -265,8 +265,8 @@ inventing a weaker answer.
 Unless the server passes `PIPE_REJECT_REMOTE_CLIENTS`, a pipe is reachable over
 SMB. A remote client has no pid on this machine and its token is a network logon
 that says nothing about which program is running. This package refuses such a
-peer with `ErrRemotePeer` [ID-E2], but the correct fix is in the server: pass the
-flag.
+peer with `ErrRemotePeer`, which is `ID-E2`, but the correct fix is in the
+server: pass the flag.
 
 ### Impersonation is a per-thread privilege escalation waiting to happen
 
@@ -649,6 +649,23 @@ running program. On macOS the verification is of the running program and the
 selection of *which* program rests on a mutable field. Neither reaches `signed`;
 only MSIX does, on Windows, and only for packaged applications.
 
+### Privilege is not a rung
+
+**A ceiling is a fact about the platform and the transport, and not about the
+account the service listens as. Running as a more privileged principal moves no
+entry in this table [ID-L7].** A service under `NT SERVICE\<name>`, under
+`DynamicUser=yes`, or under a dedicated user in a `LaunchDaemon` as Apple's
+TN2083 recommends, reaches exactly the rungs above and no others; `ProofSigned`
+stays out of reach over a pipe or a socket whoever listens. A service that needs
+a stronger identity moves its transport, which is the thing `Stronger` names and
+on macOS is XPC — § Sockets versus XPC on macOS.
+
+What a separate principal does buy is on the far side of the connection: state
+the person's own programs cannot write, so a policy file or an audit record
+becomes tamper-evident against same-user code. That is auditability, and the
+next section is why auditability is not containment. Read *privileged* as
+*stronger identity* and this whole page has been read backwards.
+
 ---
 
 ## What a service must refuse to promise, per platform
@@ -728,7 +745,9 @@ binding rules — `ID-B1`, `ID-B2`, `ID-B3`, and the macOS drift `ID-X1` — are
 identity at `signed` needs a packaged application; a Developer ID team
 identifier needs a certificate and a console session to unlock it; `ID-U2` needs
 two kernels, one with `SO_PEERPIDFD` and one without; `ID-U4` needs an LSM
-enforcing; `ID-E2` needs a peer over SMB; `ID-E7` needs `RevertToSelf` to fail.
+enforcing; `ID-E2` needs a peer over SMB; `ID-E7` needs `RevertToSelf` to fail;
+`ID-L7` needs one driver run twice under two principals and a diff of the two
+ceilings, and the second principal is made at install time by an administrator.
 Each is **UNPROVEN** by name until somebody runs it there.
 
 The shared runner cannot judge any of this yet. `conformance/DRIVER.md` closes

@@ -21,7 +21,7 @@ import (
 // socket. Measured on 15.7.4: a helper forked 405ms before the connection,
 // exec'ing /bin/cat after it, is reported by LOCAL_PEERTOKEN as the peer, and
 // the Security framework then validates /bin/cat's Apple signature honestly.
-// See research/darwin-verification/probe-evidence.txt, experiments 1, 2 and 7.
+// See probe-evidence.txt, experiments 1, 2 and 7.
 //
 // So this binding does the one thing a socket allows: it takes the token on
 // the line after accept, before the service has read anything, and refuses any

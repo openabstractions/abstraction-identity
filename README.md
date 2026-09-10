@@ -34,7 +34,7 @@ something weaker.
 | word | meaning |
 |---|---|
 | **peer** | the program on the other end: five attributes, each with a proof |
-| **proof** | how hard the value would be to fake, weakest first: `none`, `claimed`, `invalid`, `unsigned`, `unmet`, `pid`, `bound`, `kernel`, `signed` — three are verdicts, not claims; [CONTRACT.md](CONTRACT.md) says why they sit where they do |
+| **proof** | how hard the value would be to fake, weakest first: `none`, `claimed`, `invalid`, `unsigned`, `unmet`, `pid`, `bound`, `kernel`, `signed`. This is an assurance level in the sense of [NIST SP 800-63](https://pages.nist.gov/800-63-3/sp800-63-3.html), and **diverges** from one: three rungs are verdicts on a check that failed rather than claims about strength; [CONTRACT.md](CONTRACT.md) says why they sit where they do |
 | **claimed** | *the peer said so*; this package never produces it and has no API that accepts it |
 | **bound** | read through something that ties the value to the process that connected, so no successor can take its place |
 | **ceiling** | the best each attribute can reach on the running platform, known before any connection exists |

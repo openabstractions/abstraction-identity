@@ -56,6 +56,10 @@ var Program = identity.Need{
 
 var ErrNoFrame = errors.New("listen: the caller left before saying anything")
 
+// ErrTaken is a listener declining to take an endpoint away from whoever holds
+// it. Each platform adds the sentence naming who that is.
+var ErrTaken = errors.New("listen: the name is taken")
+
 type Call struct {
 	Conn
 	Caller Seen

@@ -37,10 +37,7 @@ const (
 	integrityMedium    = 0x2000
 )
 
-var (
-	errConnect = errors.New("listen: a client left before it was connected")
-	ErrTaken   = errors.New("listen: the name is taken: another listener holds it, or a client of the last one has not hung up")
-)
+var errConnect = errors.New("listen: a client left before it was connected")
 
 type pipeConn struct {
 	*os.File
@@ -71,7 +68,8 @@ func Listen(name string) (Listener, error) {
 	}
 	l := &pipeListener{name: n, sa: sa}
 	if l.waiting, err = l.instance(fileFlagFirstPipe); errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
-		return nil, fmt.Errorf("%w: %s", ErrTaken, name)
+		return nil, fmt.Errorf("%w: another listener holds it, or a client of the last one has not "+
+			"hung up: %s", ErrTaken, name)
 	} else if err != nil {
 		return nil, err
 	}
@@ -215,7 +213,8 @@ func Dial(name string) (net.Conn, error) {
 	}
 	for {
 		h, err := windows.CreateFile(n, windows.GENERIC_READ|windows.GENERIC_WRITE,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, identifyOnly, 0)
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING,
+			identifyOnly|windows.FILE_FLAG_OVERLAPPED, 0)
 		if err == nil {
 			return fileConn{os.NewFile(uintptr(h), name)}, nil
 		}
@@ -228,12 +227,19 @@ func Dial(name string) (net.Conn, error) {
 	}
 }
 
+// The three deadline methods are the embedded file's own, and they are left
+// there deliberately: a handle opened overlapped joins the runtime's poller,
+// so a deadline expires the read the way every other net.Conn does, and a
+// handle that could not join says "file type does not support deadline"
+// instead of returning nil to a caller who then waits forever.
 type fileConn struct{ *os.File }
 
-func (fileConn) LocalAddr() net.Addr              { return nil }
-func (fileConn) RemoteAddr() net.Addr             { return nil }
-func (fileConn) SetDeadline(time.Time) error      { return nil }
-func (fileConn) SetReadDeadline(time.Time) error  { return nil }
-func (fileConn) SetWriteDeadline(time.Time) error { return nil }
+func (c fileConn) LocalAddr() net.Addr  { return pipeAddr(c.Name()) }
+func (c fileConn) RemoteAddr() net.Addr { return pipeAddr(c.Name()) }
+
+type pipeAddr string
+
+func (pipeAddr) Network() string  { return "pipe" }
+func (a pipeAddr) String() string { return string(a) }
 
 func Endpoint(service string) string { return `\\.\pipe\openabstractions-` + service }

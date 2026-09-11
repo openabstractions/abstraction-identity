@@ -51,11 +51,13 @@ func (c *pipeConn) Bind() (*identity.Binding, error) {
 }
 
 type pipeListener struct {
-	name    *uint16
-	sa      *windows.SecurityAttributes
-	mu      sync.Mutex
-	waiting syscall.Handle
-	closed  bool
+	acceptMu  sync.Mutex
+	accepting bool
+	name      *uint16
+	sa        *windows.SecurityAttributes
+	mu        sync.Mutex
+	waiting   syscall.Handle
+	closed    bool
 }
 
 func Listen(name string) (Listener, error) {
@@ -127,22 +129,48 @@ func (l *pipeListener) instance(claim uintptr) (syscall.Handle, error) {
 }
 
 func (l *pipeListener) Accept() (Conn, error) {
+	// One pending instance has one accept owner, including while Close cancels it.
+	l.acceptMu.Lock()
+	defer l.acceptMu.Unlock()
 	l.mu.Lock()
-	h, closed := l.waiting, l.closed
-	l.mu.Unlock()
-	if closed {
+	if l.closed {
+		l.mu.Unlock()
 		return nil, net.ErrClosed
 	}
-
-	cerr := connect(h)
-	at := time.Now()
-	l.mu.Lock()
+	h := l.waiting
+	ev, _, err := createEvent.Call(0, 1, 0, 0)
+	if ev == 0 {
+		l.mu.Unlock()
+		return nil, err
+	}
+	defer syscall.CloseHandle(syscall.Handle(ev))
+	o := syscall.Overlapped{HEvent: syscall.Handle(ev)}
+	// Initiate while ownership is locked: Close cannot retire h before this call.
+	r, _, cerr := connectNamedPipe.Call(uintptr(h), uintptr(unsafe.Pointer(&o)))
+	if r != 0 || errors.Is(cerr, errPipeConnected) {
+		cerr = nil
+	} else if errors.Is(cerr, syscall.ERROR_IO_PENDING) {
+		l.accepting = true
+		l.mu.Unlock()
+		var n uint32
+		r, _, cerr = overlappedResult.Call(uintptr(h), uintptr(unsafe.Pointer(&o)), uintptr(unsafe.Pointer(&n)), 1)
+		if r != 0 {
+			cerr = nil
+		}
+		l.mu.Lock()
+		l.accepting = false
+	}
 	defer l.mu.Unlock()
+	at := time.Now()
 	if l.closed {
+		// Close cancelled pending I/O, but its handle stays alive until completion.
+		syscall.CloseHandle(h)
 		return nil, net.ErrClosed
 	}
 	next, err := l.instance(0)
 	if err != nil {
+		l.closed = true
+		l.waiting = 0
 		syscall.CloseHandle(h)
 		return nil, err
 	}
@@ -154,33 +182,21 @@ func (l *pipeListener) Accept() (Conn, error) {
 	return &pipeConn{File: os.NewFile(uintptr(h), "pipe"), h: h, at: at}, nil
 }
 
-func connect(h syscall.Handle) error {
-	ev, _, err := createEvent.Call(0, 1, 0, 0)
-	if ev == 0 {
-		return err
-	}
-	defer syscall.CloseHandle(syscall.Handle(ev))
-	o := syscall.Overlapped{HEvent: syscall.Handle(ev)}
-	r, _, err := connectNamedPipe.Call(uintptr(h), uintptr(unsafe.Pointer(&o)))
-	if r != 0 || errors.Is(err, errPipeConnected) {
-		return nil
-	}
-	if !errors.Is(err, syscall.ERROR_IO_PENDING) {
-		return err
-	}
-	var n uint32
-	if r, _, err = overlappedResult.Call(uintptr(h), uintptr(unsafe.Pointer(&o)), uintptr(unsafe.Pointer(&n)), 1); r == 0 {
-		return err
-	}
-	return nil
-}
-
 func (l *pipeListener) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.closed {
+		return net.ErrClosed
+	}
 	l.closed = true
-	cancelIoEx.Call(uintptr(l.waiting), 0)
-	return syscall.CloseHandle(l.waiting)
+	h := l.waiting
+	l.waiting = 0
+	if l.accepting {
+		// Accept owns this handle until GetOverlappedResult drains cancellation.
+		cancelIoEx.Call(uintptr(h), 0)
+		return nil
+	}
+	return syscall.CloseHandle(h)
 }
 
 // identifyOnly is the authority this side hands the server it reaches.

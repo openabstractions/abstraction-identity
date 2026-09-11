@@ -154,7 +154,14 @@ func TestThePipeNamesOneAccountAndNoOneElse(t *testing.T) {
 	if i := strings.Index(dacl, "S:"); i >= 0 {
 		dacl = dacl[:i]
 	}
-	if want := "(A;;FA;;;" + ourSID(t) + ")"; !strings.Contains(dacl, want) {
+	// Windows may abbreviate a well-known account RID (e.g. 500) as LA.
+	// Canonicalize the expected descriptor through the same Windows API.
+	expected, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + ourSID(t) + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := expected.String()
+	if !strings.Contains(dacl, want) {
 		t.Fatalf("the account that created the listener is not admitted: want %s in %s", want, dacl)
 	}
 	if strings.Count(dacl, "(A;") != 1 {

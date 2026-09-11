@@ -13,7 +13,7 @@ import (
 )
 
 func TestASocketBelongsToTheFirstListener(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "first.sock")
+	path := filepath.Join(shortSocketDir(t), "first.sock")
 	first, err := Listen(path)
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +40,7 @@ func TestASocketBelongsToTheFirstListener(t *testing.T) {
 }
 
 func TestAnExistingFileIsNeverRemoved(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "not-a-socket")
+	path := filepath.Join(shortSocketDir(t), "not-a-socket")
 	want := []byte("somebody else's file")
 	if err := os.WriteFile(path, want, 0o600); err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestAnExistingFileIsNeverRemoved(t *testing.T) {
 }
 
 func TestAStaleSocketIsReplaced(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "stale.sock")
+	path := filepath.Join(shortSocketDir(t), "stale.sock")
 	first, err := Listen(path)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +95,7 @@ func TestAStaleSocketIsReplaced(t *testing.T) {
 }
 
 func TestTheSocketIsShutToOtherAccounts(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mode.sock")
+	path := filepath.Join(shortSocketDir(t), "mode.sock")
 	l, err := Listen(path)
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestTheSocketIsShutToOtherAccounts(t *testing.T) {
 }
 
 func TestConcurrentStartsElectOneListener(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "race.sock")
+	path := filepath.Join(shortSocketDir(t), "race.sock")
 	const starters = 8
 	var wg sync.WaitGroup
 	won := make(chan Listener, starters)

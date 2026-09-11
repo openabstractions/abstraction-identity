@@ -392,3 +392,48 @@ func currentUserSID(t *testing.T) string {
 	}
 	return u.User.Sid.String()
 }
+
+func TestImageVerificationAcceptsDOSAlias(t *testing.T) {
+	p, err := windows.UTF16PtrFromString(mustExe(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetShortPathName(p, &buf[0], uint32(len(buf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 || n >= uint32(len(buf)) {
+		t.Fatal("short path exceeds buffer")
+	}
+	short := windows.UTF16ToString(buf[:n])
+	if samePath(short, mustExe(t)) {
+		t.Skip("filesystem has no distinct DOS alias for this executable")
+	}
+	self, err := windows.GetCurrentProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifyImage(self, short, nil); err != nil {
+		t.Fatalf("DOS alias %q: %v", short, err)
+	}
+}
+
+func TestImageRecheckRejectsDifferentHeldFile(t *testing.T) {
+	other, err := os.CreateTemp(t.TempDir(), "other-image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	self, err := windows.GetCurrentProcess()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := longImagePath(mustExe(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stillSameImage(self, windows.Handle(other.Fd()), want); err == nil {
+		t.Fatal("a different held file passed the image recheck")
+	}
+}

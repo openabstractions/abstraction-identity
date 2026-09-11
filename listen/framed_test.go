@@ -21,12 +21,31 @@ import (
 
 var framedSerial atomic.Uint64
 
+// Framing tests exercise bytes and lifecycle at the portable proof floor.
+// Production Program requirements remain separate and are tested below.
+var framingNeed = identity.Need{User: identity.ProofKernel, Process: identity.ProofPID, Path: identity.ProofPID}
+
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	// t.TempDir includes the test name, exceeding Darwin's sockaddr_un limit.
+	dir, err := os.MkdirTemp("", "oa-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	return dir
+}
+
 func framedEndpoint(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		return Endpoint(fmt.Sprintf("frame-test-%d-%d", os.Getpid(), framedSerial.Add(1)))
 	}
-	return filepath.Join(t.TempDir(), "frame.sock")
+	return filepath.Join(shortSocketDir(t), "frame.sock")
 }
 func TestFramedRoundtrip(t *testing.T) {
 	for _, exchange := range []bool{false, true} {
@@ -43,7 +62,7 @@ func TestFramedRoundtrip(t *testing.T) {
 					result <- err
 					return
 				}
-				k, err := ReceiveFramed(context.Background(), c, Program, 0)
+				k, err := ReceiveFramed(context.Background(), c, framingNeed, 0)
 				if err != nil {
 					result <- err
 					return
@@ -101,7 +120,7 @@ func TestFramedRejectBeforeExposure(t *testing.T) {
 			a, b := net.Pipe()
 			c := &refusingFrameConn{Conn: a}
 			go func() { b.Write(tc.wire); b.Close() }()
-			k, err := ReceiveFramed(context.Background(), c, Program, 16)
+			k, err := ReceiveFramed(context.Background(), c, framingNeed, 16)
 			if k != nil || !errors.Is(err, tc.want) || c.binds.Load() != tc.binds {
 				t.Fatalf("call=%v err=%v binds=%d", k, err, c.binds.Load())
 			}
@@ -115,7 +134,7 @@ func TestFramedCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		k, err := ReceiveFramed(ctx, c, Program, 16)
+		k, err := ReceiveFramed(ctx, c, framingNeed, 16)
 		if k != nil {
 			err = errors.New("exposed cancelled frame")
 		}
@@ -148,7 +167,7 @@ func TestFramedTruncatedBody(t *testing.T) {
 			done <- err
 			return
 		}
-		k, err := ReceiveFramed(context.Background(), c, Program, 16)
+		k, err := ReceiveFramed(context.Background(), c, framingNeed, 16)
 		if k != nil {
 			err = errors.New("truncated body exposed")
 		}
@@ -318,7 +337,7 @@ func TestFramedCancelBlockedNativeReceive(t *testing.T) {
 			done <- err
 			return
 		}
-		k, err := ReceiveFramed(ctx, &observedFrameConn{Conn: c, started: started}, Program, 16)
+		k, err := ReceiveFramed(ctx, &observedFrameConn{Conn: c, started: started}, framingNeed, 16)
 		if k != nil {
 			err = errors.New("cancelled native read exposed a call")
 		}
@@ -351,7 +370,7 @@ func TestFramedExpiredBeforeDispatch(t *testing.T) {
 	c := &refusingFrameConn{Conn: a}
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	k, err := ReceiveFramed(ctx, c, Program, 16)
+	k, err := ReceiveFramed(ctx, c, framingNeed, 16)
 	if k != nil || !errors.Is(err, context.DeadlineExceeded) || c.binds.Load() != 0 {
 		t.Fatalf("call=%v err=%v binds=%d", k, err, c.binds.Load())
 	}
@@ -371,7 +390,7 @@ func TestFramedPeerTypedAndClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		k, err := ReceiveFramed(ctx, c, Program, 16)
+		k, err := ReceiveFramed(ctx, c, framingNeed, 16)
 		if err != nil {
 			cancel()
 			l.Close()
@@ -386,7 +405,7 @@ func TestFramedPeerTypedAndClosed(t *testing.T) {
 		path, pathProof := p.Path.Get()
 		user, userProof := p.User.Get()
 		process, processProof := p.Process.Get()
-		if path == "" || path == k.Caller.Path || pathProof < Program.Path || user.Kind == "" || userProof < Program.User || process.PID != os.Getpid() || processProof < Program.Process || p.Platform != runtime.GOOS {
+		if path == "" || path == k.Caller.Path || pathProof < framingNeed.Path || user.Kind == "" || userProof < framingNeed.User || process.PID != os.Getpid() || processProof < framingNeed.Process || p.Platform != runtime.GOOS {
 			t.Fatalf("wrong typed peer: path=%q proof=%v user=%+v proof=%v process=%+v proof=%v", path, pathProof, user, userProof, process, processProof)
 		}
 		// Exercise recheck concurrently with resource release under the race detector.
@@ -419,5 +438,35 @@ func TestFramedPeerTypedAndClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 		l.Close()
+	}
+}
+
+// A working framing transport must not upgrade the platform's proof ceiling.
+func TestFramedProgramRefusesBelowCeiling(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin's process proof ceiling is below Program")
+	}
+	endpoint := framedEndpoint(t)
+	l, err := Listen(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	done := make(chan error, 1)
+	go func() { done <- (FrameClient{Endpoint: endpoint}).WriteFrame([]byte("request")) }()
+	c, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := ReceiveFramed(context.Background(), c, Program, 16)
+	if call != nil {
+		call.Close()
+		t.Fatal("Program accepted a caller below its proof requirement")
+	}
+	if !errors.Is(err, identity.ErrNotProven) {
+		t.Fatalf("expected proof refusal, got %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

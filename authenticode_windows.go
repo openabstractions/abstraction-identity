@@ -34,6 +34,12 @@ import (
 // requires write access to the directory and precise timing. It is the reason
 // Code never reports better than ProofBound. See CONTRACT.md.
 func verifyImage(proc windows.Handle, imagePath string, opts *Options) (Code, Proof, error) {
+	// Expand DOS 8.3 aliases before verification, preserving this initial name
+	// for the later rename/swap checks rather than recanonicalizing it afterwards.
+	imagePath, err := longImagePath(imagePath)
+	if err != nil {
+		return Code{}, ProofNone, err
+	}
 	pathW, err := windows.UTF16PtrFromString(imagePath)
 	if err != nil {
 		return Code{}, ProofNone, err
@@ -80,6 +86,10 @@ func stillSameImage(proc, file windows.Handle, want string) error {
 	if err != nil {
 		return fmt.Errorf("the process image path could no longer be read: %w", err)
 	}
+	now, err = longImagePath(now)
+	if err != nil {
+		return fmt.Errorf("the process image path could not be normalized: %w", err)
+	}
 	if !samePath(now, want) {
 		return fmt.Errorf("the process image path changed from %q to %q during verification", want, now)
 	}
@@ -88,11 +98,32 @@ func stillSameImage(proc, file windows.Handle, want string) error {
 	if err != nil {
 		return fmt.Errorf("the verified file could no longer be named: %w", err)
 	}
+	if n == 0 || n >= uint32(len(buf)) {
+		return fmt.Errorf("the verified file path exceeds the buffer")
+	}
 	got := strings.TrimPrefix(windows.UTF16ToString(buf[:n]), `\\?\`)
 	if !samePath(got, want) {
 		return fmt.Errorf("the file that was verified is now at %q, not %q", got, want)
 	}
 	return nil
+}
+
+// longImagePath expands short DOS components without resolving the final file
+// afresh after verification. Failure refuses identity rather than guessing.
+func longImagePath(path string) (string, error) {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetLongPathName(p, &buf[0], uint32(len(buf)))
+	if err != nil {
+		return "", err
+	}
+	if n == 0 || n >= uint32(len(buf)) {
+		return "", fmt.Errorf("image path exceeds the buffer")
+	}
+	return strings.TrimPrefix(windows.UTF16ToString(buf[:n]), `\\?\`), nil
 }
 
 // verifyTrust runs the Authenticode policy over an already-open file handle.

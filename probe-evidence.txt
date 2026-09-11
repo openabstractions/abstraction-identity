@@ -213,10 +213,10 @@ tag would freeze, GOWORK=off, on the machine above.
 ##################################################
 Published at abstraction-identity/probe/, this module did not build:
 
-  replacement directory .. does not exist
+  replacement directory ../abstraction-identity does not exist
   missing go.sum entry for module providing package golang.org/x/sys/unix
 
-The replace is relative to probe/, so .. names a sibling
+The replace is relative to probe/, so ../abstraction-identity names a sibling
 of probe/ inside the repo. The repo root is one level up and is spelt "..".
 Fixed here to "..", and go.sum added. Both verified: build and vet clean.
 

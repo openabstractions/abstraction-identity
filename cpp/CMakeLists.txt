@@ -6,6 +6,8 @@ add_library(abstraction_ipc src/client.cpp)
 add_library(abstraction::ipc ALIAS abstraction_ipc)
 set_target_properties(abstraction_ipc PROPERTIES EXPORT_NAME ipc)
 target_compile_features(abstraction_ipc PRIVATE cxx_std_17)
+# Header-only process-token identity helper uses Windows security APIs.
+target_link_libraries(abstraction_ipc PUBLIC $<$<PLATFORM_ID:Windows>:advapi32>)
 target_include_directories(abstraction_ipc PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)

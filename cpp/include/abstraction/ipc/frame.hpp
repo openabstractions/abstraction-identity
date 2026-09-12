@@ -22,9 +22,14 @@ public:
         : endpoint_(std::move(endpoint)), timeout_(timeout_ms),
           limit_(max_frame ? max_frame : DefaultMaxFrame) {}
 
+    // An absolute deadline is shared by every exchange using this transport.
+    FrameTransport(std::string endpoint, Deadline deadline, uint32_t max_frame = DefaultMaxFrame)
+        : endpoint_(std::move(endpoint)), timeout_(0), limit_(max_frame ? max_frame : DefaultMaxFrame),
+          deadline_(deadline), fixed_deadline_(true) {}
+
     void WriteFrame(std::string_view frame) {
         check_size(frame.size());
-        Stream stream(endpoint_, Clock::now() + std::chrono::milliseconds(timeout_));
+        Stream stream(endpoint_, operation_deadline());
         send(stream, frame);
         char byte;
         size_t moved = 0;
@@ -36,7 +41,7 @@ public:
 
     std::string ExchangeFrame(std::string_view frame) {
         check_size(frame.size());
-        Stream stream(endpoint_, Clock::now() + std::chrono::milliseconds(timeout_));
+        Stream stream(endpoint_, operation_deadline());
         send(stream, frame);
         unsigned char header[4];
         read_exact(stream, header, sizeof header);
@@ -49,6 +54,12 @@ public:
     }
 
 private:
+    Deadline operation_deadline() const {
+        const auto now = Clock::now();
+        if (fixed_deadline_ && deadline_ <= now)
+            throw FrameError("call deadline expired", Status::timeout);
+        return fixed_deadline_ ? deadline_ : now + std::chrono::milliseconds(timeout_);
+    }
     void check_size(size_t size) const {
         if (size > limit_ || size > UINT32_MAX)
             throw FrameError("frame too large", Status::invalid_argument);
@@ -72,5 +83,7 @@ private:
     }
     std::string endpoint_;
     uint32_t timeout_, limit_;
+    Deadline deadline_{};
+    bool fixed_deadline_ = false;
 };
 }}

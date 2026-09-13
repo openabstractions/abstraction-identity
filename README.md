@@ -49,7 +49,8 @@ implementation to it.
 - **Go.** `go get github.com/openabstractions/abstraction-identity`. The module
   is at the repository root. One dependency, `golang.org/x/sys`. No tag yet;
   `go get` resolves a pseudo-version of `main`.
-- **Python, C++.** None.
+- **Other languages.** See generated protocol and shared transport/client packages
+  in this repository and the facade. Native provider support is separate.
 
 ## What it does
 
@@ -133,8 +134,8 @@ if err := peer.Check(policy); err != nil { c.Close(); return }
 `Options.ConnectedAt` is worth setting on every platform, and on macOS it is
 doing more work than anywhere else. It is what bounds pid reuse: nothing is read
 out of the peer's pid unless the process behind it can be shown to have existed
-before the connection did. On macOS that same check is also what stops a caller
-spawning a signed program and handing it the socket — see CONTRACT.md.
+before the connection did. On macOS this check does not prevent substitution by a process that existed
+before connection; see the measured limitation below and CONTRACT.md.
 
 ## Binding a peer, instead of looking one up
 
@@ -160,7 +161,7 @@ question.
 
 ## Today
 
-**Go only.** `listen/` is the local listener the services above it share.
+**Native Go provider profile.** `listen/` is the local listener the services above it share.
 
 | | Windows (npipe) | macOS (unix) | Linux (unix) |
 | --- | --- | --- | --- |

@@ -1,9 +1,14 @@
 # Rust binding to shared IPC
 
-This dependency-free crate wraps the existing native client C ABI. It supplies
+The raw transport example below is explicitly unverified compatibility. Supply
+`ServerExpectation` from independent host configuration for authenticated local
+use; an endpoint convention alone is not installation trust.
+
+
+This crate depends on the pure `abstraction-frame` contract and wraps the existing native client C ABI. It supplies
 native bootstrap, bounded framed bytes, deadlines and cancellation. Generated
-Rust capability clients are not yet available; this crate establishes transport
-behavior only. It contains no service, local provider or per-capability JSON.
+Rust capability clients use this transport through the shared framing trait.
+Transport evidence and each capability behavior have separate scopes. It contains no service, local provider or per-capability JSON.
 
 ## Build against an installed native prefix
 
@@ -57,5 +62,5 @@ deadline refuses before opening a connection.
 
 Current execution evidence covers Windows/MSVC only. The isolated Rust fixture
 uses an installed static prefix and copied outside consumer, tests protocol
-faults with a Go peer, and leaves the application directory empty. Generated
-typed capability integration and Linux/macOS execution remain separate work.
+faults with a Go peer, and leaves the application directory empty. Generated typed job, logging and storage clients have separate focused fixtures.
+This transport page does not qualify Linux/macOS execution.

@@ -23,3 +23,34 @@ ctest --test-dir consumer-build -C Debug --output-on-failure
 ```
 
 For a Windows shared build, put the staging `bin` directory on the test process's PATH (or deploy the DLL beside the executable). Static builds are the default. `test/consumer` uses only `find_package(abstraction_ipc CONFIG REQUIRED)` and public include paths; its C main exercises the C ABI against a fixture listener. With an installed download package, `-DTEST_DOWNLOAD_PACKAGE=ON` also links its discovery target. All listener code is test-only and tests have a 10-second limit.
+
+## Per-operation cancellation
+
+`CancellationSource` owns a cancellation handle. `source.Token()` returns a
+copyable token and `source.Cancel()` signals it idempotently from another thread.
+Tokens keep the handle alive; a default token is uncancelable. Keep the source
+available while an application needs to signal it. Concurrent assignment or
+destruction of the same C++ object requires external synchronization.
+
+```cpp
+abstraction::ipc::CancellationSource stop;
+auto operation = transport.WithCancellation(stop.Token());
+// Another thread may call stop.Cancel() while this exchange waits.
+auto reply = operation.ExchangeFrame(request);
+```
+
+`WithCancellation` returns an operation-scoped transport copy and preserves its
+endpoint, frame limit and deadline. The original transport remains reusable.
+Use a new source for a new cancellation lifetime. Waiting cancellation throws
+`FrameError` with `Status::cancelled`; it leaves provider acceptance or execution
+unresolved and sends no cancel-work request. `Stream(endpoint, deadline, token)`
+uses the same native cancellation mechanism for byte I/O.
+
+The C API exposes create/signal/release and `oa_ipc_open_cancelable`. Connections
+retain the native state after open, allowing the handle to be released while the
+connection remains active. Releasing a raw handle must not race with signalling
+or opening through that same raw pointer. Existing open and default C++ transport
+calls retain their original behavior.
+
+The `test/cancellation` installed consumer exercises cancellation and handle
+lifetime with local fixture listeners. Its CTest timeout is 20 seconds.

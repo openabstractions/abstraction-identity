@@ -1,11 +1,40 @@
 #include <abstraction/ipc/client.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 const char* fixture_start(void);
 int fixture_finish(void);
 static int failures;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); ++failures; } } while (0)
+static void endpoint_env(const char* value) {
+#ifdef _WIN32
+    CHECK(_putenv_s("ABSTRACTION_RUNTIME_ENDPOINT",value)==0);
+#else
+    CHECK(setenv("ABSTRACTION_RUNTIME_ENDPOINT",value,1)==0);
+#endif
+}
+static void bootstrap_test(void) {
+    size_t required=99;
+    char buffer[512]; memset(buffer,'!',sizeof buffer);
+    CHECK(oa_ipc_runtime_endpoint(NULL,0,NULL)==OA_IPC_INVALID_ARGUMENT);
+    CHECK(oa_ipc_runtime_endpoint(NULL,1,&required)==OA_IPC_INVALID_ARGUMENT && required==0);
+    CHECK(oa_ipc_runtime_endpoint(buffer,0,&required)==OA_IPC_INVALID_ARGUMENT && required==0);
+    endpoint_env("explicit-bootstrap");
+    CHECK(oa_ipc_runtime_endpoint(NULL,0,&required)==OA_IPC_OK && required==19);
+    CHECK(oa_ipc_runtime_endpoint(buffer,1,&required)==OA_IPC_INVALID_ARGUMENT && required==19 && buffer[0]=='!');
+    CHECK(oa_ipc_runtime_endpoint(buffer,required,&required)==OA_IPC_OK && strcmp(buffer,"explicit-bootstrap")==0);
+    endpoint_env("a-longer-explicit-bootstrap");
+    CHECK(oa_ipc_runtime_endpoint(buffer,19,&required)==OA_IPC_INVALID_ARGUMENT && required==28);
+    CHECK(strcmp(buffer,"explicit-bootstrap")==0);
+    CHECK(oa_ipc_runtime_endpoint(buffer,sizeof buffer,&required)==OA_IPC_OK && strcmp(buffer,"a-longer-explicit-bootstrap")==0);
+    endpoint_env("");
+    CHECK(oa_ipc_runtime_endpoint(buffer,sizeof buffer,&required)==OA_IPC_OK && required>1);
+#ifdef _WIN32
+    CHECK(strstr(buffer,"openabstractions-user-S-1-")!=NULL);
+#endif
+}
 int main(void) {
+    bootstrap_test();
     oa_ipc_connection* c = NULL;
     size_t moved = 42;
     unsigned char data[] = {0, 10, 255, 65, 0, 13, 10};

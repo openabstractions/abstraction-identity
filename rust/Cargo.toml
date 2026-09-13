@@ -1,0 +1,13 @@
+[package]
+name = "abstraction-ipc"
+version = "0.0.0"
+edition = "2021"
+description = "Rust client binding to the installed OpenAbstractions IPC C ABI"
+links = "abstraction_ipc"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+abstraction-frame = { path = "../rust-frame" }

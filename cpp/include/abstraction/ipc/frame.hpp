@@ -13,6 +13,22 @@ public:
         : std::runtime_error(message), status(s) {}
 };
 
+// Snapshot independently selected installation evidence within the caller budget.
+inline ServerExpectation SelectRuntime(Deadline deadline, const CancellationToken& token = {}) {
+    auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    auto ms = left <= 0 ? 0 : static_cast<uint32_t>(std::min<decltype(left)>(left, UINT32_MAX));
+    oa_ipc_runtime_selection* raw = nullptr;
+    auto status = oa_ipc_select_runtime(ms, token.handle_.get(), &raw);
+    std::unique_ptr<oa_ipc_runtime_selection, decltype(&oa_ipc_runtime_selection_release)>
+        selection(raw, oa_ipc_runtime_selection_release);
+    if (status != OA_IPC_OK) throw FrameError("IPC runtime selection failed", static_cast<Status>(status));
+    const auto* value = oa_ipc_selected_server(selection.get());
+    if (!value || value->version != 1 || !value->principal || !value->program)
+        throw FrameError("IPC runtime selection invalid", Status::proof_unavailable);
+    return {value->principal_kind, std::string(value->principal, value->principal_length),
+            std::string(value->program, value->program_length)};
+}
+
 // New connection per operation. Millisecond timeout spans connect/send/read.
 // EOF completion of WriteFrame is not an application success acknowledgement.
 class FrameTransport {
@@ -27,9 +43,20 @@ public:
         : endpoint_(std::move(endpoint)), timeout_(0), limit_(max_frame ? max_frame : DefaultMaxFrame),
           deadline_(deadline), fixed_deadline_(true) {}
 
+    // Cancellation affects waiting for calls using this copy. It never sends
+    // provider cancellation or changes the original transport.
+    FrameTransport WithCancellation(CancellationToken token) const {
+        auto copy = *this;
+        copy.cancellation_ = std::move(token);
+        return copy;
+    }
+
+    FrameTransport WithServerExpectation(std::optional<ServerExpectation> server) const {
+        auto copy = *this; copy.server_ = std::move(server); return copy;
+    }
     void WriteFrame(std::string_view frame) {
         check_size(frame.size());
-        Stream stream(endpoint_, operation_deadline());
+        Stream stream(endpoint_, operation_deadline(), cancellation_, server_);
         send(stream, frame);
         char byte;
         size_t moved = 0;
@@ -41,7 +68,7 @@ public:
 
     std::string ExchangeFrame(std::string_view frame) {
         check_size(frame.size());
-        Stream stream(endpoint_, operation_deadline());
+        Stream stream(endpoint_, operation_deadline(), cancellation_, server_);
         send(stream, frame);
         unsigned char header[4];
         read_exact(stream, header, sizeof header);
@@ -85,5 +112,7 @@ private:
     uint32_t timeout_, limit_;
     Deadline deadline_{};
     bool fixed_deadline_ = false;
+    CancellationToken cancellation_;
+    std::optional<ServerExpectation> server_;
 };
 }}

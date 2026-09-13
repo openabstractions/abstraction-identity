@@ -1,6 +1,7 @@
 #pragma once
 
 // Internal client byte stream. No framing, discovery, or listener policy.
+#include "cancellation.h"
 #include <algorithm>
 #include <chrono>
 #include <climits>
@@ -28,7 +29,7 @@
 namespace abstraction { namespace local_stream {
 using Clock = std::chrono::steady_clock;
 using Deadline = Clock::time_point;
-enum class Status { ok, timeout, disconnected, io_error };
+enum class Status { ok, timeout, disconnected, io_error, cancelled };
 namespace detail {
 inline int remaining_ms(Deadline deadline) {
     auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
@@ -58,7 +59,7 @@ inline int remaining_ms(Deadline deadline) {
 // is no longer ours. That last wait is the step a first attempt always omits.
 template <typename Fn>
 inline bool overlapped_io(Fn&& fn, HANDLE handle, void* buffer, DWORD bytes, Deadline deadline,
-                   DWORD* moved) {
+                   DWORD* moved, Cancellation* cancellation) {
     OVERLAPPED ov{};
     ov.hEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (ov.hEvent == nullptr) return false;
@@ -71,13 +72,18 @@ inline bool overlapped_io(Fn&& fn, HANDLE handle, void* buffer, DWORD bytes, Dea
             ::SetLastError(err);
             return false;  // including ERROR_BROKEN_PIPE, which is EOF
         }
-        if (::WaitForSingleObject(ov.hEvent, remaining_ms(deadline)) != WAIT_OBJECT_0) {
+        HANDLE events[2]{ov.hEvent, cancellation ? cancellation->wake() : nullptr};
+        const DWORD waited = ::WaitForMultipleObjects(cancellation ? 2 : 1, events, FALSE, remaining_ms(deadline));
+        if (waited != WAIT_OBJECT_0) {
+            const DWORD wait_error = waited == WAIT_FAILED ? ::GetLastError() :
+                cancellation && cancellation->requested() ? ERROR_OPERATION_ABORTED :
+                waited == WAIT_TIMEOUT ? ERROR_TIMEOUT : ERROR_GEN_FAILURE;
             ::CancelIoEx(handle, &ov);
             // bWait = TRUE: block until the cancelled operation is genuinely
             // finished with our buffer. It returns promptly.
             ::GetOverlappedResult(handle, &ov, moved, TRUE);
             ::CloseHandle(ov.hEvent);
-            ::SetLastError(ERROR_TIMEOUT);
+            ::SetLastError(wait_error);
             return false;
         }
         ok = ::GetOverlappedResult(handle, &ov, moved, FALSE) != 0;
@@ -93,10 +99,25 @@ inline bool overlapped_io(Fn&& fn, HANDLE handle, void* buffer, DWORD bytes, Dea
 // Busy is not absent. It means every instance of a pipe that DOES exist is
 // currently talking to somebody, and reporting absent there makes a supervisor
 // look dead precisely when it is busiest.
-inline HANDLE open_pipe(const std::string& path, Deadline deadline) {
+inline HANDLE open_pipe(const std::string& path, Deadline deadline, Cancellation* cancellation) {
     const std::wstring wide(path.begin(), path.end());  // the name is hex ASCII
     const DWORD flags =
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
+    if (cancellation) {
+        for (;;) {
+            if (cancellation->requested()) { ::SetLastError(ERROR_OPERATION_ABORTED); return INVALID_HANDLE_VALUE; }
+            const int left = remaining_ms(deadline);
+            if (left <= 0) { ::SetLastError(ERROR_TIMEOUT); return INVALID_HANDLE_VALUE; }
+            HANDLE h = ::CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                     OPEN_EXISTING, flags, nullptr);
+            if (h != INVALID_HANDLE_VALUE) return h;
+            if (::GetLastError() != ERROR_PIPE_BUSY) return INVALID_HANDLE_VALUE;
+            // Busy-pipe activation has no waitable readiness handle. The wake
+            // event interrupts this bounded retry interval immediately.
+            if (::WaitForSingleObject(cancellation->wake(), static_cast<DWORD>(std::min(left,5))) == WAIT_FAILED)
+                return INVALID_HANDLE_VALUE;
+        }
+    }
     for (int attempt = 0; attempt < 2; ++attempt) {
         const HANDLE h = ::CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                                        OPEN_EXISTING, flags, nullptr);
@@ -133,15 +154,21 @@ inline void suppress_sigpipe(int fd) {
 #endif
 }
 
-inline bool wait_ready(int fd, short events, Deadline deadline) {
+inline bool wait_ready(int fd, short events, Deadline deadline, Cancellation* cancellation) {
     const int left = remaining_ms(deadline);
     if (left <= 0) return false;
-    struct pollfd pfd {};
-    pfd.fd = fd;
-    pfd.events = events;
+    struct pollfd pfd[2]{};
+    pfd[0].fd = fd;
+    pfd[0].events = events;
+    if (cancellation) {pfd[1].fd = cancellation->wake();pfd[1].events = POLLIN;}
     for (;;) {
-        const int rc = ::poll(&pfd, 1, remaining_ms(deadline));
-        if (rc > 0) return true;
+        if (cancellation && cancellation->requested()) {errno=ECANCELED;return false;}
+        const int rc = ::poll(pfd, cancellation ? 2 : 1, remaining_ms(deadline));
+        if (rc > 0) {
+            if (cancellation && cancellation->requested()) {errno=ECANCELED;return false;}
+            if (cancellation && pfd[1].revents) {errno=EIO;return false;}
+            return true;
+        }
         if (rc == 0) return false;                 // the deadline
         if (errno != EINTR) return false;
         if (remaining_ms(deadline) <= 0) return false;  // a signal, then the deadline
@@ -157,7 +184,8 @@ inline bool wait_ready(int fd, short events, Deadline deadline) {
 // complete application message on that connection. Destruction closes it.
 class Stream {
 public:
-    Stream(const std::string& path, Deadline deadline) : deadline_(deadline) {
+    Stream(const std::string& path, Deadline deadline, std::shared_ptr<Cancellation> cancellation = {})
+        : deadline_(deadline), cancellation_(std::move(cancellation)) {
         if (!budget()) return;
         if (path.find('\0') != std::string::npos) { status_ = Status::io_error; return; }
 #ifdef _WIN32
@@ -168,8 +196,9 @@ public:
         // Discovery's published pipe names are ASCII. Reject other spelling
         // explicitly until a shared runtime defines endpoint text encoding.
         for (unsigned char c : path) if (c > 127) { status_ = Status::io_error; return; }
-        handle_ = detail::open_pipe(path, deadline_);
+        handle_ = detail::open_pipe(path, deadline_, cancellation_.get());
         if (handle_ == INVALID_HANDLE_VALUE) fail();
+        else ::GetSystemTimeAsFileTime(&connected_at_);
 #else
         sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
@@ -181,7 +210,7 @@ public:
         const int flags = ::fcntl(handle_, F_GETFL, 0);
         if (flags < 0 || ::fcntl(handle_, F_SETFL, flags | O_NONBLOCK) < 0) { fail(); return; }
         if (::connect(handle_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-            if (errno != EINPROGRESS || !detail::wait_ready(handle_, POLLOUT, deadline_)) { fail(); return; }
+            if (errno != EINPROGRESS || !detail::wait_ready(handle_, POLLOUT, deadline_, cancellation_.get())) { fail(); return; }
             int err = 0;
             socklen_t len = sizeof(err);
             if (::getsockopt(handle_, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) { fail(); return; }
@@ -197,6 +226,14 @@ public:
     }
     Stream(const Stream&) = delete;
     Stream& operator=(const Stream&) = delete;
+    // Internal common-boundary access. Stream retains ownership.
+#ifdef _WIN32
+    HANDLE native_handle() const { return handle_; }
+    FILETIME connected_at() const { return connected_at_; }
+#else
+    int native_handle() const { return handle_; }
+#endif
+    bool check_budget() { return valid() && budget(); }
     bool valid() const { return status_ == Status::ok; }
     Status status() const { return status_; }
     bool write_all(std::string_view bytes, std::size_t* transferred = nullptr) {
@@ -209,9 +246,9 @@ public:
 #ifdef _WIN32
             DWORD moved = 0;
             if (!detail::overlapped_io(&::WriteFile, handle_, const_cast<char*>(bytes.data() + sent),
-                                      static_cast<DWORD>(count), deadline_, &moved)) return fail();
+                                      static_cast<DWORD>(count), deadline_, &moved, cancellation_.get())) return fail();
 #else
-            if (!detail::wait_ready(handle_, POLLOUT, deadline_)) return fail();
+            if (!detail::wait_ready(handle_, POLLOUT, deadline_, cancellation_.get())) return fail();
             const ssize_t moved = ::send(handle_, bytes.data() + sent, count, detail::kSendFlags);
             if (moved < 0) {
                 if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
@@ -234,9 +271,9 @@ public:
             const auto count = std::min<std::size_t>(capacity, INT_MAX);
 #ifdef _WIN32
             DWORD n = 0;
-            if (!detail::overlapped_io(&::ReadFile, handle_, buffer, static_cast<DWORD>(count), deadline_, &n)) return fail();
+            if (!detail::overlapped_io(&::ReadFile, handle_, buffer, static_cast<DWORD>(count), deadline_, &n, cancellation_.get())) return fail();
 #else
-            if (!detail::wait_ready(handle_, POLLIN, deadline_)) return fail();
+            if (!detail::wait_ready(handle_, POLLIN, deadline_, cancellation_.get())) return fail();
             const ssize_t n = ::recv(handle_, buffer, count, 0);
             if (n < 0) {
                 if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
@@ -250,6 +287,7 @@ public:
     }
 private:
     bool budget() {
+        if (cancellation_ && cancellation_->requested()) {status_=Status::cancelled;return false;}
         if (detail::remaining_ms(deadline_) > 0) return true;
         status_ = Status::timeout;
         return false;
@@ -270,9 +308,11 @@ private:
         return false;
     }
     Deadline deadline_;
+    std::shared_ptr<Cancellation> cancellation_;
     Status status_ = Status::ok;
 #ifdef _WIN32
     HANDLE handle_ = INVALID_HANDLE_VALUE;
+    FILETIME connected_at_{};
 #else
     int handle_ = -1;
 #endif

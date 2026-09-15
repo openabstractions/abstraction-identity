@@ -1,0 +1,12 @@
+# Native link requirements of the abstraction_ipc library.
+# One line per requirement: <platform> <kind> <library>
+#   platform  windows | linux | macos
+#   kind      system       a platform library every consumer links
+#             cxx-runtime  the C++ runtime; a C++ linker supplies it, other linkers name it
+# CMake applies system entries to the exported target and installs this file as
+# share/abstraction_ipc/link-dependencies.txt. Rust build.rs reads that installed
+# copy. check_link_dependencies.py fails when any consumer diverges from it.
+windows system advapi32
+windows system msi
+linux cxx-runtime stdc++
+macos cxx-runtime c++

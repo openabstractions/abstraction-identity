@@ -149,6 +149,9 @@ inline const std::vector<std::string> kNativeOperations = {"OfHandle", "OfConn",
 
 inline const std::vector<std::string> kNativeBindingTypes = {"Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options"};
 
+// Minimum proof for each native Peer attribute. Policy comparison uses the
+// declared native order. A serialized requirement or proof name never supplies
+// caller identity; native bindings derive values from the accepted connection.
 struct ProofRequirement {
     std::string user;
     std::string process;
@@ -157,6 +160,9 @@ struct ProofRequirement {
     std::string code;
 };
 
+// Diagnostic refusal metadata. Underlying native attribute and connection
+// evidence remain inseparable; this record cannot create authenticated
+// evidence.
 struct ProofFailure {
     std::string attribute;
     std::string have;

@@ -123,6 +123,9 @@ NATIVE_OPERATIONS = ["OfHandle", "OfConn", "CanEver", "Check", "Get", "AtLeast"]
 NATIVE_BINDING_TYPES = ["Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options"]
 
 
+# Minimum proof for each native Peer attribute. Policy comparison uses the
+# declared native order. A serialized requirement or proof name never supplies
+# caller identity; native bindings derive values from the accepted connection.
 class ProofRequirement:
     def __init__(self, **kw):
         self.user = kw.get("user", "")
@@ -132,6 +135,8 @@ class ProofRequirement:
         self.code = kw.get("code", "")
 
 
+# Diagnostic refusal metadata. Underlying native attribute and connection
+# evidence remain inseparable; this record cannot create authenticated evidence.
 class ProofFailure:
     def __init__(self, **kw):
         self.attribute = kw.get("attribute", "")

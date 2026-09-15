@@ -213,6 +213,9 @@ var NativeOperations = []string{"OfHandle", "OfConn", "CanEver", "Check", "Get",
 
 var NativeBindingTypes = []string{"Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options"}
 
+// Minimum proof for each native Peer attribute. Policy comparison uses the
+// declared native order. A serialized requirement or proof name never supplies
+// caller identity; native bindings derive values from the accepted connection.
 type ProofRequirement struct {
 	User    string
 	Process string
@@ -221,6 +224,9 @@ type ProofRequirement struct {
 	Code    string
 }
 
+// Diagnostic refusal metadata. Underlying native attribute and connection
+// evidence remain inseparable; this record cannot create authenticated
+// evidence.
 type ProofFailure struct {
 	Attribute string
 	Have      string

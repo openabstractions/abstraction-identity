@@ -23,9 +23,25 @@ cargo test --offline --manifest-path rust/Cargo.toml
 
 Use your shell's environment syntax and an absolute drive path on Windows.
 The build script requires `lib/abstraction_ipc.lib` on Windows or
-`lib/libabstraction_ipc.a` on Unix. It links the C++ runtime and Windows security
-library where applicable. A missing library or Windows prefix containing the
+`lib/libabstraction_ipc.a` on Unix, plus the prefix's
+`share/abstraction_ipc/link-dependencies.txt`. It links exactly the entries that
+installed list names for the target platform; the CMake package applies the same
+list, and `cpp/check_link_dependencies.py` fails when they diverge. A missing library or Windows prefix containing the
 IPC DLL is refused. Static linkage supplies no runtime IPC DLL search.
+
+## Type-check without a native prefix
+
+`cargo check` compiles without linking. With `OA_IPC_CHECK_ONLY=1` the build
+script skips the prefix and emits no link directives. This crate, and any crate
+or example that depends on it, then type-checks on a host with no C++ toolchain:
+
+```sh
+OA_IPC_CHECK_ONLY=1 cargo check --offline --manifest-path rust/Cargo.toml
+```
+
+The build script prints a warning naming the mode. The mode links no native
+library, and a program that calls the transport cannot link. Build, test and
+ship with the installed prefix above.
 
 An outside application's Cargo.toml can depend on this source crate through a
 path dependency. Version 0.0.0 is development metadata, with no registry release

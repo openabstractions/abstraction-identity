@@ -35,7 +35,7 @@ enum Proof {
  7: bound
  8: kernel
  9: signed
-}(unknown="refuse")
+}(unknown="refuse",reader="act")
 struct ProofRequirement {
  1: required Proof user
  2: required Proof process

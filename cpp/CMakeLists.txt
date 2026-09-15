@@ -4,11 +4,41 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 add_library(abstraction_ipc src/client.cpp)
 add_library(abstraction::ipc ALIAS abstraction_ipc)
-set_target_properties(abstraction_ipc PROPERTIES EXPORT_NAME ipc)
+# The static archive is linked into shared modules such as the Node addon, and
+# Linux links a shared object only from position-independent code. The interface
+# property is exported, so a consumer's target agrees with the archive.
+set_target_properties(abstraction_ipc PROPERTIES EXPORT_NAME ipc
+    POSITION_INDEPENDENT_CODE ON
+    INTERFACE_POSITION_INDEPENDENT_CODE ON)
 target_compile_features(abstraction_ipc PRIVATE cxx_std_17)
-# Header-only process-token identity helper uses Windows security APIs.
-target_link_libraries(abstraction_ipc PUBLIC $<$<PLATFORM_ID:Windows>:advapi32>)
-target_link_libraries(abstraction_ipc PUBLIC $<$<PLATFORM_ID:Windows>:msi>)
+# Platform link requirements come from link-dependencies.txt, the one list Rust
+# build.rs also reads from the installed prefix. cxx-runtime entries are supplied
+# by the C++ linker CMake consumers already use.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/link-dependencies.txt" abstraction_ipc_link_lines REGEX "^[^#]")
+foreach(line IN LISTS abstraction_ipc_link_lines)
+    string(REGEX MATCHALL "[^ \t]+" fields "${line}")
+    list(LENGTH fields field_count)
+    if(NOT field_count EQUAL 3)
+        message(FATAL_ERROR "link-dependencies.txt: expected '<platform> <kind> <library>': ${line}")
+    endif()
+    list(GET fields 0 link_platform)
+    list(GET fields 1 link_kind)
+    list(GET fields 2 link_name)
+    if(link_platform STREQUAL "windows")
+        set(link_platform_id Windows)
+    elseif(link_platform STREQUAL "linux")
+        set(link_platform_id Linux)
+    elseif(link_platform STREQUAL "macos")
+        set(link_platform_id Darwin)
+    else()
+        message(FATAL_ERROR "link-dependencies.txt: unknown platform ${link_platform}")
+    endif()
+    if(link_kind STREQUAL "system")
+        target_link_libraries(abstraction_ipc PUBLIC "$<$<PLATFORM_ID:${link_platform_id}>:${link_name}>")
+    elseif(NOT link_kind STREQUAL "cxx-runtime")
+        message(FATAL_ERROR "link-dependencies.txt: unknown kind ${link_kind}")
+    endif()
+endforeach()
 target_include_directories(abstraction_ipc PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -21,6 +51,7 @@ install(TARGETS abstraction_ipc EXPORT abstraction_ipcTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES link-dependencies.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/abstraction_ipc)
 set(config_dir ${CMAKE_INSTALL_LIBDIR}/cmake/abstraction_ipc)
 install(EXPORT abstraction_ipcTargets NAMESPACE abstraction:: DESTINATION ${config_dir})
 configure_package_config_file(cmake/abstraction_ipcConfig.cmake.in
@@ -55,5 +86,18 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         set_tests_properties(CConsumer PROPERTIES TIMEOUT 10)
         add_test(NAME CancellationConsumer COMMAND ipc_cancellation_consumer)
         set_tests_properties(CancellationConsumer PROPERTIES TIMEOUT 20)
+        # Installs this build's static package and links a shared module against
+        # it, as the Node addon does. Unix only: Windows links DLLs from any object.
+        if(UNIX AND NOT BUILD_SHARED_LIBS)
+            add_test(NAME InstalledStaticSharedModule COMMAND ${CMAKE_COMMAND}
+                -DBUILD_DIR=${CMAKE_BINARY_DIR}
+                -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/test/shared_module
+                -DWORK_DIR=${CMAKE_BINARY_DIR}/shared-module-test
+                -DCONFIG=$<CONFIG>
+                -DC_COMPILER=${CMAKE_C_COMPILER}
+                -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/test/shared_module/run.cmake)
+            set_tests_properties(InstalledStaticSharedModule PROPERTIES TIMEOUT 120)
+        endif()
     endif()
 endif()

@@ -1,6 +1,6 @@
 # Shared IPC client byte transport
 
-`abstraction_ipc` / `abstraction::ipc` supplies client connection I/O over local Windows named pipes and POSIX Unix sockets. It is reused from the existing discovery client. This is not a C++ implementation of identity's complete proof or authorization API. It supplies neither servers nor framing, service discovery, generated RPC interfaces, nor provider behavior.
+`abstraction_ipc` / `abstraction::ipc` supplies client connection I/O over local Windows named pipes and POSIX Unix sockets. This is not a C++ implementation of identity's complete proof or authorization API. It supplies neither servers nor framing, service discovery, generated RPC interfaces, nor provider behavior.
 
 The C ABI is in `<abstraction/ipc/client.h>`; its opaque connection is allocated and freed by the same library. Version is `1`. Status values are explicit integers. Buffers belong to callers. A failed open clears the output handle. Close accepts NULL; calls must not race with I/O or another close. Errors and C++ allocation failures return statuses, not exceptions. Invalid arguments perform no I/O.
 
@@ -22,7 +22,7 @@ cmake --build consumer-build --config Debug
 ctest --test-dir consumer-build -C Debug --output-on-failure
 ```
 
-For a Windows shared build, put the staging `bin` directory on the test process's PATH (or deploy the DLL beside the executable). Static builds are the default. `test/consumer` uses only `find_package(abstraction_ipc CONFIG REQUIRED)` and public include paths; its C main exercises the C ABI against a fixture listener. With an installed download package, `-DTEST_DOWNLOAD_PACKAGE=ON` also links its discovery target. All listener code is test-only and tests have a 10-second limit.
+For a Windows shared build, put the staging `bin` directory on the test process's PATH (or deploy the DLL beside the executable). Static builds are the default. `test/consumer` uses only `find_package(abstraction_ipc CONFIG REQUIRED)` and public include paths; its C main exercises the C ABI against a fixture listener. All listener code is test-only and tests have a 10-second limit.
 
 ## Per-operation cancellation
 

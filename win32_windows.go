@@ -122,3 +122,28 @@ func errnoOrEINVAL(e syscall.Errno) error {
 	}
 	return syscall.EINVAL
 }
+
+var procGetPackagePathByFullName = modkernel32.NewProc("GetPackagePathByFullName")
+
+// packagePathByFullName returns the folder an installed MSIX package's files
+// live in, such as C:\Program Files\WindowsApps\<full name>.
+func packagePathByFullName(fullName string) (string, error) {
+	name, err := windows.UTF16PtrFromString(fullName)
+	if err != nil {
+		return "", err
+	}
+	var n uint32
+	r1, _, _ := syscall.SyscallN(procGetPackagePathByFullName.Addr(), uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(&n)), 0)
+	if syscall.Errno(r1) != syscall.ERROR_INSUFFICIENT_BUFFER || n == 0 {
+		if r1 == 0 {
+			return "", syscall.ERROR_NOT_FOUND
+		}
+		return "", syscall.Errno(r1)
+	}
+	buf := make([]uint16, n)
+	r1, _, _ = syscall.SyscallN(procGetPackagePathByFullName.Addr(), uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(&n)), uintptr(unsafe.Pointer(&buf[0])))
+	if r1 != 0 {
+		return "", syscall.Errno(r1)
+	}
+	return windows.UTF16ToString(buf), nil
+}

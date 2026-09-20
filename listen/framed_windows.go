@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -53,4 +54,27 @@ func dialPipeContext(ctx context.Context, name string, legacy bool) (net.Conn, e
 		case <-timer.C:
 		}
 	}
+}
+
+var peekNamedPipe = kernel32.NewProc("PeekNamedPipe")
+
+// idleIntact reports whether a pooled pipe has nothing to read and has not
+// been ended: a byte waiting is the server's closing marker, and a failed peek
+// is a server that closed.
+func idleIntact(c net.Conn) bool {
+	sc, ok := c.(syscall.Conn)
+	if !ok {
+		return false
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		return false
+	}
+	intact := false
+	err = raw.Control(func(fd uintptr) {
+		var available uint32
+		r, _, _ := peekNamedPipe.Call(fd, 0, 0, 0, uintptr(unsafe.Pointer(&available)), 0)
+		intact = r != 0 && available == 0
+	})
+	return err == nil && intact
 }

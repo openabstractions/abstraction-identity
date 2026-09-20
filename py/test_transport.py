@@ -141,6 +141,44 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, IO_ERROR)
         self.assertEqual(native.closes, 1)
 
+    def test_sessions_use_the_shared_session_call_with_trust_and_flags(self):
+        server = ServerExpectation(2, "123", "/installed/runtime")
+        seen = []
+        class Sessions:
+            def _session_call(self, endpoint, length, millis, signal, expected, frame, frame_length, limit, flags, reply, sent):
+                value = expected._obj
+                seen.append((endpoint, value.principal, value.program, frame, limit, flags))
+                if flags == 0:
+                    reply._obj.value = 99
+                return 0
+            buffer = C.create_string_buffer(b"reply")
+            def _reply_data(self, reply, length):
+                length._obj.value = 5
+                return C.addressof(self.buffer)
+            def _reply_release(self, reply):
+                seen.append(("released", reply.value))
+            def _open_cancelable(self, *args):
+                raise AssertionError("a session transport opened a connection itself")
+            _open_verified = _open_cancelable
+        native = Sessions()
+        original = FrameTransport(native, "endpoint", server=server, sessions=True, max_frame=64)
+        for transport in (original, original.call_scope(), original.with_waiting()):
+            self.assertTrue(transport.sessions)
+            self.assertEqual(transport.exchange_frame(b"ask"), b"reply")
+        original.write_frame(b"tell")
+        self.assertEqual(seen, [(b"endpoint", b"123", b"/installed/runtime", b"ask", 64, 0), ("released", 99)] * 3 +
+                         [(b"endpoint", b"123", b"/installed/runtime", b"tell", 64, 1)])
+
+    def test_sessions_fall_back_to_a_connection_per_call_on_an_older_library(self):
+        native = Native()
+        token = Cancellation(native)
+        with token:
+            token.signal()
+            with self.assertRaises(FrameError) as caught:
+                FrameTransport(native, "endpoint", cancellation=token, sessions=True).exchange_frame(b"x")
+        self.assertEqual(caught.exception.status, CANCELLED)
+        self.assertTrue(native.opened.is_set())
+
 
 if __name__ == "__main__":
     unittest.main()

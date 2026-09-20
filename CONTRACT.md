@@ -198,6 +198,36 @@ That is why `Code` never exceeds `bound` on Windows, and why `CanEver(Need{Code:
 ProofSigned})` fails there [ID-W1]. Asserted by
 `TestWindowsRefusesToPromiseASignature`.
 
+### One verification per process instance
+
+`WinVerifyTrust` hashes the whole image file: about 2 ms for a small unsigned
+program, 30 to 40 ms for the signed `python.exe` and 150 to 210 ms for the 90 MB
+signed `node.exe` (measured 2026-09-17). A service binds every connection, and
+before this rule each call from a signed interpreter paid that again.
+
+The verdict for a peer is now kept for later connections from the same live
+process instance at the same image path [ID-W2]. The key is pid, creation time,
+the image path read afresh through the pinned handle for each connection, and
+`CheckRevocation`. The kept entry holds its own handle to the process, so while
+it exists the pid names that process object and no other. A Windows process
+cannot replace its own image, and the file cannot be opened for writing while
+it is mapped, so the file the first verification read is the file the process
+still runs. User, process, path and package are still read for every
+connection; only the Authenticode verdict is reused. Failed verifications are
+not kept.
+
+A kept verdict does not see a change in this machine's trust, such as a root or
+catalog added or removed or a certificate expiring, until it is five minutes
+old. Entries for exited processes are released when the next verdict is kept,
+and at most 256 are held. Asserted by `TestSignedPeerIsVerifiedOncePerProcess`
+and `TestCodeVerdictIsReusedOnlyForTheSameInstanceAndPath`.
+
+The account name beside a user's SID comes from an LSA lookup of about 250 us.
+It is display text; the SID is read from the peer's token for every
+connection. A looked-up name is remembered for one minute, so a renamed account
+shows its old name for up to that long [ID-W3]. Asserted by
+`TestAccountNameIsRememberedBriefly`.
+
 ### A signature names a publisher, not a program
 
 `kernel32.dll` verifies as trusted and its embedded signature names *Microsoft
@@ -620,6 +650,49 @@ here, `CanEver(Need{Code: ProofSigned})` fails, and the failure names XPC
 [ID-X3]. A
 service that genuinely needs a signed identity on macOS should move its
 transport, not raise its expectations of this one.
+
+---
+
+## Loopback TCP: the socket-owner binding
+
+A loopback TCP connection carries no peer credentials. A service that must
+accept one, for example a local window speaking a vendor's HTTP wire to programs
+that only know a base URL, binds its peer through the operating system's record
+of which process owns the client socket. `BindLoopback` is that binding and
+`LoopbackCeiling()` its ceiling; both report transport `tcp-loopback`
+[ID-T1]. A connection whose ends are not IPv4 loopback addresses is
+`ErrRemotePeer`, and a connection that is not TCP is `ErrUnsupportedConn`
+[ID-T2].
+
+- **Windows.** `GetExtendedTcpTable` (`TCP_TABLE_OWNER_PID_CONNECTIONS`) names
+  the process that created the client socket. The binding opens it, requires a
+  creation time before the connection, and reads user, path and package through
+  that handle, so user, process and path are `bound`. The table records the
+  creator, and a socket handle can be duplicated into another process. A
+  creator that has exited while the connection is still established is
+  therefore `ErrPeerMoved`, at bind and at every recheck [ID-T3]. A creator that
+  is alive and shares its socket with a second process is invisible, the same
+  limit the pipe binding states.
+- **Linux.** `/proc/net/tcp` names the socket inode and the uid the kernel
+  attached to the socket at creation (`kernel`). The binding scans same-uid
+  descriptor tables for that inode, requires exactly one holder, pins it with
+  `pidfd_open`, confirms the holder behind the pin and captures its image path,
+  so process and path are `bound`. Two holders, a later change of holder, or an
+  exec into another image are `ErrPeerMoved` [ID-T4]. A socket owned by another
+  uid is `ErrNoBinding`. A binding taken after the only process that connected
+  has passed the socket names the process that holds it, which is the program
+  now speaking.
+- **macOS.** `ErrNoBinding` always, and `Bindable` is false [ID-T5]. The
+  per-socket process record follows the most recent writer, the defeat measured
+  for `AF_UNIX`, so protected calls keep the recorded identity refusal.
+
+`Peer.Rung()` summarises transport, platform and the proof of user, process
+and path in one line, the value a decision's audit records [ID-T6]. A loopback
+rung is weaker than the platform's native transport, and `Stronger` names that
+transport. A binding is taken on the line after accept, before the service
+reads a byte, and rechecked before each action. The handle-passing attack in
+`loopback_test.go` passes a bound connection to a child and exits; the binding's
+recheck answers `ErrPeerMoved` on Windows and Linux.
 
 ---
 

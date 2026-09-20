@@ -31,6 +31,9 @@ func TestMain(m *testing.M) {
 	if ran, code := attackHelperMain(); ran {
 		os.Exit(code)
 	}
+	if ran, code := loopbackHelperMain(); ran {
+		os.Exit(code)
+	}
 	if path := os.Getenv(unixClientEnv); path != "" {
 		os.Exit(runChildClient(path, os.Getenv(unixPayloadEnv), os.Getenv(unixLingerEnv) != ""))
 	}

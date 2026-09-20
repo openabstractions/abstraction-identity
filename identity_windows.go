@@ -173,7 +173,7 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 	case !p.Path.Known():
 		p.Code = unknown[Code]("code", "there is no image path to verify")
 	default:
-		code, verdict, err := verifyImage(proc, imagePath, opts)
+		code, verdict, err := verifyProcessImage(proc, pid, started, imagePath, opts)
 		if err != nil {
 			p.Code = unknown[Code]("code", "verification could not be performed: "+err.Error())
 			p.note("code: %v", err)

@@ -3,6 +3,7 @@ package identity
 import (
 	"errors"
 	"net"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -61,6 +62,45 @@ type binder interface {
 	release() error
 }
 
+// bindingState owns the platform handle. Every Binding view reaches the same
+// state, so an owner closing the handle cannot race a shared request that is
+// rechecking or querying it.
+type bindingState struct {
+	mu       sync.RWMutex
+	inner    binder
+	closed   bool
+	closeErr error
+}
+
+func (b *bindingState) recheck() error {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
+		return net.ErrClosed
+	}
+	return b.inner.recheck()
+}
+
+func (b *bindingState) alive() (bool, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
+		return false, net.ErrClosed
+	}
+	return b.inner.alive()
+}
+
+func (b *bindingState) release() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return b.closeErr
+	}
+	b.closeErr = b.inner.release()
+	b.closed = true
+	return b.closeErr
+}
+
 // Bind captures the peer identity of an accepted local connection and keeps
 // the platform handle needed to re-check it.
 //
@@ -71,7 +111,7 @@ func Bind(h Handle, opts *Options) (*Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Binding{peer: peer, boundAt: time.Now(), inner: inner}, nil
+	return &Binding{peer: peer, boundAt: time.Now(), inner: &bindingState{inner: inner}}, nil
 }
 
 // BindConn is [Bind] for a net.Conn that is willing to give up its handle.
@@ -138,3 +178,15 @@ func (b *Binding) Check(n Need) error {
 // pidfd on Linux and a process handle on Windows, and on Linux a leaked pidfd
 // holds the peer's pid reserved for as long as the service runs.
 func (b *Binding) Close() error { return b.inner.release() }
+
+// Shared returns a view of b for one request on a connection that carries
+// several. The view rechecks through b's platform handle exactly as b does,
+// and closing it releases nothing: the connection's owner closes b, after
+// every view is done.
+func (b *Binding) Shared() *Binding {
+	return &Binding{peer: b.peer, boundAt: b.boundAt, inner: sharedBinder{b.inner}}
+}
+
+type sharedBinder struct{ binder }
+
+func (sharedBinder) release() error { return nil }

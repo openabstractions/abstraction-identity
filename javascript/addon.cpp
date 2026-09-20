@@ -29,7 +29,7 @@ struct Work {
   Token signal;
   Clock::time_point deadline;
   size_t limit=0,transferred=0;
-  bool reply=false;
+  bool reply=false,sessions=false;
   int status=OA_IPC_OK;
   const char* stage="open";
 };
@@ -82,6 +82,20 @@ void execute(napi_env,void* p){
     auto left=w.deadline-Clock::now();
     if(left<=Clock::duration::zero()){w.status=OA_IPC_TIMEOUT;return;}
     auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(left).count();
+    if(w.sessions){
+      // One call through the shared library's session pool (FRAMING.md "Sessions").
+      const oa_ipc_server_expectation expected{sizeof(oa_ipc_server_expectation),1,w.principal_kind,0,
+        w.principal.data(),w.principal.size(),w.program.data(),w.program.size()};
+      oa_ipc_reply* answer=nullptr;
+      w.stage="exchange";
+      w.status=oa_ipc_session_call(w.endpoint.data(),w.endpoint.size(),static_cast<uint32_t>(ms),w.signal?w.signal->value:nullptr,
+        w.principal_kind?&expected:nullptr,w.request.data()+4,w.request.size()-4,static_cast<uint32_t>(w.limit),
+        w.reply?0:OA_IPC_CALL_ONE_WAY,&answer,&w.transferred);
+      std::unique_ptr<oa_ipc_reply,decltype(&oa_ipc_reply_release)> owned(answer,oa_ipc_reply_release);
+      if(w.status==OA_IPC_OK&&w.reply){size_t n=0;const auto* data=oa_ipc_reply_data(answer,&n);if(n)w.response.assign(data,data+n);}
+      if(w.status==OA_IPC_INVALID_ARGUMENT)w.stage="frame_limit";
+      return;
+    }
     oa_ipc_connection* raw=nullptr;
     if(w.principal_kind){
       const oa_ipc_server_expectation expected{sizeof(oa_ipc_server_expectation),1,w.principal_kind,0,
@@ -130,8 +144,8 @@ napi_value call(napi_env env,napi_callback_info info){
   bool counted=false;
   std::unique_ptr<Work> w;
   try{
-    size_t n=7;napi_value args[7];checked(napi_get_cb_info(env,info,&n,args,nullptr,nullptr));
-    if(n!=6&&n!=7)throw napi_invalid_arg;
+    size_t n=8;napi_value args[8];checked(napi_get_cb_info(env,info,&n,args,nullptr,nullptr));
+    if(n<6||n>8)throw napi_invalid_arg;
     w=std::make_unique<Work>();size_t length=0;
     checked(napi_get_value_string_utf8(env,args[0],nullptr,0,&length));
     if(length==0||length>4096)throw napi_invalid_arg;
@@ -145,7 +159,11 @@ napi_value call(napi_env env,napi_callback_info info){
     w->deadline=Clock::now()+std::chrono::milliseconds(static_cast<uint32_t>(timeout));w->limit=static_cast<size_t>(limit);
     napi_valuetype type;checked(napi_typeof(env,args[3],&type));if(type!=napi_null&&type!=napi_undefined)w->signal=token(env,args[3]);
     checked(napi_get_value_bool(env,args[5],&w->reply));
-    if(n==7){
+    if(n==8){
+      checked(napi_typeof(env,args[7],&type));
+      if(type!=napi_undefined)checked(napi_get_value_bool(env,args[7],&w->sessions));
+    }
+    if(n>=7){
       checked(napi_typeof(env,args[6],&type));
       if(type!=napi_null&&type!=napi_undefined){
         napi_value field;double kind_value;
@@ -172,14 +190,90 @@ napi_value call(napi_env env,napi_callback_info info){
     if(counted)active.fetch_sub(1);return fail(env,"invalid or over-capacity IPC call");
   }
 }
+// Installed runtime selection through the shared selector, off the JavaScript
+// thread: Linux queries the user manager, which may take the whole budget.
+struct Selection {
+  napi_async_work work=nullptr;
+  napi_deferred deferred=nullptr;
+  Token signal;
+  uint32_t timeout=0;
+  int status=OA_IPC_OK;
+  uint32_t kind=0;
+  std::string principal,program;
+};
+void select_execute(napi_env,void* p){
+  auto& s=*static_cast<Selection*>(p);
+  try{
+    oa_ipc_runtime_selection* raw=nullptr;
+    s.status=oa_ipc_select_runtime(s.timeout,s.signal?s.signal->value:nullptr,&raw);
+    if(s.status!=OA_IPC_OK)return;
+    if(!raw){s.status=OA_IPC_INTERNAL_ERROR;return;}
+    std::unique_ptr<oa_ipc_runtime_selection,decltype(&oa_ipc_runtime_selection_release)> owned(raw,oa_ipc_runtime_selection_release);
+    const auto* e=oa_ipc_selected_server(raw);
+    if(!e||e->struct_size!=sizeof(oa_ipc_server_expectation)||e->version!=1||e->reserved||
+        (e->principal_kind!=OA_IPC_PRINCIPAL_WINDOWS_SID&&e->principal_kind!=OA_IPC_PRINCIPAL_POSIX_UID)||
+        !e->principal||!e->program||e->principal_length==0||e->principal_length>65536||
+        e->program_length==0||e->program_length>65536){s.status=OA_IPC_INTERNAL_ERROR;return;}
+    s.kind=e->principal_kind;s.principal.assign(e->principal,e->principal_length);s.program.assign(e->program,e->program_length);
+    if(s.principal.find('\0')!=std::string::npos||s.program.find('\0')!=std::string::npos)s.status=OA_IPC_INTERNAL_ERROR;
+  }catch(const std::bad_alloc&){s.status=OA_IPC_NO_MEMORY;}catch(...){s.status=OA_IPC_INTERNAL_ERROR;}
+}
+void select_complete(napi_env env,napi_status status,void* p){
+  std::unique_ptr<Selection> s(static_cast<Selection*>(p));
+  if(s->signal){auto& q=s->signal->queued;q.erase(std::remove(q.begin(),q.end(),s->work),q.end());}
+  active.fetch_sub(1);
+  if(status!=napi_ok&&s->status==OA_IPC_OK)s->status=OA_IPC_CANCELLED;
+  napi_value result,field;
+  if(s->status==OA_IPC_OK&&napi_create_object(env,&result)==napi_ok&&
+      napi_create_uint32(env,s->kind,&field)==napi_ok&&napi_set_named_property(env,result,"principalKind",field)==napi_ok&&
+      napi_create_string_utf8(env,s->principal.data(),s->principal.size(),&field)==napi_ok&&napi_set_named_property(env,result,"principal",field)==napi_ok&&
+      napi_create_string_utf8(env,s->program.data(),s->program.size(),&field)==napi_ok&&napi_set_named_property(env,result,"program",field)==napi_ok){
+    napi_resolve_deferred(env,s->deferred,result);
+  }else{
+    if(s->status==OA_IPC_OK)s->status=OA_IPC_INTERNAL_ERROR;
+    napi_value message;
+    if(napi_create_string_utf8(env,"select",NAPI_AUTO_LENGTH,&message)==napi_ok&&napi_create_error(env,nullptr,message,&result)==napi_ok){
+      napi_create_int32(env,s->status,&field);napi_set_named_property(env,result,"status",field);
+      napi_create_double(env,0,&field);napi_set_named_property(env,result,"transferred",field);
+      napi_reject_deferred(env,s->deferred,result);
+    }
+  }
+  napi_delete_async_work(env,s->work);
+}
+napi_value select_runtime(napi_env env,napi_callback_info info){
+  bool counted=false;
+  std::unique_ptr<Selection> s;
+  try{
+    size_t n=2;napi_value args[2];checked(napi_get_cb_info(env,info,&n,args,nullptr,nullptr));
+    if(n!=2)throw napi_invalid_arg;
+    s=std::make_unique<Selection>();
+    double timeout;checked(napi_get_value_double(env,args[0],&timeout));
+    if(!std::isfinite(timeout)||timeout<0||timeout>UINT32_MAX)throw napi_invalid_arg;
+    s->timeout=static_cast<uint32_t>(timeout);
+    napi_valuetype type;checked(napi_typeof(env,args[1],&type));if(type!=napi_null&&type!=napi_undefined)s->signal=token(env,args[1]);
+    unsigned previous=active.fetch_add(1);counted=true;
+    if(previous>=32)throw napi_queue_full;
+    napi_value promise,name;checked(napi_create_promise(env,&s->deferred,&promise));checked(napi_create_string_utf8(env,"oa.ipc.select",NAPI_AUTO_LENGTH,&name));
+    checked(napi_create_async_work(env,nullptr,name,select_execute,select_complete,s.get(),&s->work));
+    if(s->signal)s->signal->queued.push_back(s->work);
+    checked(napi_queue_async_work(env,s->work));s.release();return promise;
+  }catch(...){
+    if(s&&s->work){
+      if(s->signal){auto& q=s->signal->queued;q.erase(std::remove(q.begin(),q.end(),s->work),q.end());}
+      napi_delete_async_work(env,s->work);
+    }
+    if(counted)active.fetch_sub(1);return fail(env,"invalid or over-capacity runtime selection");
+  }
+}
 napi_value init(napi_env env,napi_value exports){
   if(oa_ipc_version()!=1)return fail(env,"unsupported IPC ABI version");
   napi_property_descriptor methods[]={
     {"call",nullptr,call,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"createCancellation",nullptr,create_signal,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"cancel",nullptr,cancel,nullptr,nullptr,nullptr,napi_default,nullptr},
-    {"runtimeEndpoint",nullptr,bootstrap,nullptr,nullptr,nullptr,napi_default,nullptr}};
-  if(napi_define_properties(env,exports,4,methods)!=napi_ok)return nullptr;return exports;
+    {"runtimeEndpoint",nullptr,bootstrap,nullptr,nullptr,nullptr,napi_default,nullptr},
+    {"selectRuntime",nullptr,select_runtime,nullptr,nullptr,nullptr,napi_default,nullptr}};
+  if(napi_define_properties(env,exports,5,methods)!=napi_ok)return nullptr;return exports;
 }
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME,init)

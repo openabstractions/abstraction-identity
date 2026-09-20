@@ -112,6 +112,34 @@ OA_IPC_API oa_ipc_status oa_ipc_read(oa_ipc_connection*, void* buffer,
 /* NULL is allowed. Frees in the allocating library; other uses of the handle
    after close, or pointers not returned by open, are invalid. */
 OA_IPC_API void oa_ipc_close(oa_ipc_connection*);
+
+/* Additive ABI-1 session extension: one framed call through a session
+   (listen/FRAMING.md "Sessions"). The library keeps a process-wide pool of
+   connections per endpoint and server expectation (NULL: unverified), at most
+   four idle for ten seconds each. A verified connection keeps rechecking the
+   server's evidence before and after every read, as open_verified does.
+   timeout_ms and the cancellation apply to this call alone; a call that fails,
+   expires or is cancelled closes its connection. flags: 0 for an exchange,
+   OA_IPC_CALL_ONE_WAY for a one-way frame (no reply). An endpoint that answers
+   a session request as single-exchange, or closes it unanswered, is served one
+   connection per call for 30 seconds. Use it only where the server answers or
+   closes an oversized header; a server that does neither makes the call wait
+   for its deadline.
+   On success an exchange sets *reply (release with oa_ipc_reply_release); a
+   one-way call sets it to NULL. *sent receives the request bytes written to a
+   connection that was never reported closed before reading them; a failure
+   with *sent equal to the frame length may have reached the server. A request
+   the server announced it did not read (closing marker) is repeated once on a
+   new connection within the same budget. */
+enum { OA_IPC_CALL_ONE_WAY = 1 };
+typedef struct oa_ipc_reply oa_ipc_reply;
+OA_IPC_API oa_ipc_status oa_ipc_session_call(const char* endpoint, size_t length,
+    uint32_t timeout_ms, oa_ipc_cancellation*, const oa_ipc_server_expectation*,
+    const void* frame, size_t frame_length, uint32_t max_reply, uint32_t flags,
+    oa_ipc_reply** reply, size_t* sent);
+/* The reply payload and its length; valid until release. NULL is allowed. */
+OA_IPC_API const unsigned char* oa_ipc_reply_data(const oa_ipc_reply*, size_t* length);
+OA_IPC_API void oa_ipc_reply_release(oa_ipc_reply*);
 #ifdef __cplusplus
 }
 #endif

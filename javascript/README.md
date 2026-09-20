@@ -14,6 +14,12 @@ fixed `native/oa_ipc_node.node` file. `ABSTRACTION_IPC_NODE` may select an expli
 absolute addon file. It performs no working-directory DLL search. No npm runtime
 dependencies or installation hooks are needed.
 
+`selectRuntime({timeout, deadline, cancellation})` (also `NativeConnector.selectRuntime`)
+returns the installed runtime's identity from the shared C ABI selector, on a
+libuv worker under the same waiting rules. It connects to nothing. No or an
+ambiguous installation rejects with `Status.Untrusted`; a platform without the
+facilities rejects with `Status.ProofUnavailable`. Pass the result as `server`.
+
 `new FrameTransport(endpoint, {timeout:5000, deadline:null, cancellation:null})`
 uses milliseconds and a monotonic `performance.now()` deadline. Defaults receive
 a fresh budget for each call. An explicit deadline stays absolute. Cancellation
@@ -28,7 +34,16 @@ Errors retain C ABI status and confirmed transfer count; an aborted write may
 have delivered more bytes than the confirmed prefix. One-way EOF acknowledges
 transport completion and supplies no durability receipt.
 
+The experimental `@openabstractions/ipc/bun` subpath provides the same framed transport for
+Bun through `ABSTRACTION_IPC_LIBRARY`. A Worker owns each synchronous C ABI
+session call while the caller's event loop signals its cancellation handle.
+This development binding accepts an explicit endpoint and no server expectation;
+installed runtime selection remains a packaging requirement. Requests for either
+feature fail with `Status.ProofUnavailable`; configured identity verification is
+never dropped. Calls are bounded to the same 32 active-operation capacity as the
+Node binding.
+
 Node-API workers keep the event loop available for AbortSignal callbacks. They
 use the bounded libuv worker pool; queued time consumes the same call deadline.
-The source fixture verifies Windows/MSVC. Other native platforms need execution
-evidence before claiming support. Package version 0.0.0 is development metadata.
+The source fixture verifies Windows/MSVC and Linux/GCC. Other native platforms
+need execution evidence before claiming support. Package version 0.0.0 is development metadata.

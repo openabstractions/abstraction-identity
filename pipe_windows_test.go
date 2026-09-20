@@ -126,6 +126,9 @@ func startChildClient(t *testing.T, name, payload string) *exec.Cmd {
 // TestMain turns this binary into the pipe client when the environment says
 // so, and otherwise runs the tests.
 func TestMain(m *testing.M) {
+	if ran, code := loopbackHelperMain(); ran {
+		os.Exit(code)
+	}
 	if name := os.Getenv(clientEnv); name != "" {
 		os.Exit(runChildClient(name, os.Getenv(clientEnv+"_PAYLOAD")))
 	}

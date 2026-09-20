@@ -70,7 +70,26 @@ extern "C" {
         transferred: *mut usize,
     ) -> i32;
     fn oa_ipc_close(handle: *mut c_void);
+    fn oa_ipc_select_runtime(timeout_ms: u32, signal: *mut c_void, out: *mut *mut c_void) -> i32;
+    fn oa_ipc_selected_server(selection: *const c_void) -> *const NativeExpectation;
+    fn oa_ipc_runtime_selection_release(selection: *mut c_void);
+    fn oa_ipc_session_call(
+        endpoint: *const c_char,
+        length: usize,
+        timeout_ms: u32,
+        signal: *mut c_void,
+        server: *const NativeExpectation,
+        frame: *const c_void,
+        frame_length: usize,
+        max_reply: u32,
+        flags: u32,
+        reply: *mut *mut c_void,
+        sent: *mut usize,
+    ) -> i32;
+    fn oa_ipc_reply_data(reply: *const c_void, length: *mut usize) -> *const u8;
+    fn oa_ipc_reply_release(reply: *mut c_void);
 }
+const CALL_ONE_WAY: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
@@ -136,6 +155,85 @@ pub fn runtime_endpoint() -> Result<String, Error> {
             .map_err(|_| error(INVALID_ARGUMENT, "bootstrap is not UTF-8"));
     }
     Err(error(INVALID_ARGUMENT, "bootstrap changed repeatedly"))
+}
+
+/// Milliseconds left before `deadline`, rounded up, or `TIMEOUT` once it passed.
+fn budget(deadline: Instant, message: &'static str) -> Result<u32, Error> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(error(TIMEOUT, message));
+    }
+    Ok(remaining
+        .as_millis()
+        .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+        .min(u32::MAX as u128) as u32)
+}
+
+/// Selects the installed runtime's identity through the shared native selector,
+/// without connecting to it or starting it. Windows reads the registered
+/// installation of the current account; Linux reads the loaded user runtime unit.
+/// No installation, or an ambiguous one, is `UNTRUSTED`; a platform without the
+/// required facilities is `PROOF_UNAVAILABLE`. The endpoint override variable
+/// never supplies this identity. Pass the result to
+/// `FrameTransport::with_server_expectation` for every connection that must
+/// reach that runtime.
+pub fn select_runtime(
+    deadline: Instant,
+    cancellation: Option<&Cancellation>,
+) -> Result<ServerExpectation, Error> {
+    version()?;
+    let millis = budget(deadline, "runtime selection deadline expired")?;
+    let signal = cancellation
+        .map(|s| s.0 .0.as_ptr())
+        .unwrap_or(ptr::null_mut());
+    let mut raw = ptr::null_mut();
+    // The borrowed signal outlives this synchronous call; the selection is
+    // released below on every path after its strings are copied.
+    let status = unsafe { oa_ipc_select_runtime(millis, signal, &mut raw) };
+    if status != OK {
+        return Err(error(status, "installed runtime selection failed"));
+    }
+    let selection = NonNull::new(raw)
+        .ok_or_else(|| error(INTERNAL_ERROR, "native runtime selection absent"))?;
+    struct Selection(NonNull<c_void>);
+    impl Drop for Selection {
+        fn drop(&mut self) {
+            unsafe { oa_ipc_runtime_selection_release(self.0.as_ptr()) }
+        }
+    }
+    let selection = Selection(selection);
+    // The expectation and its strings belong to the selection until release.
+    let server = unsafe { oa_ipc_selected_server(selection.0.as_ptr()).as_ref() }
+        .ok_or_else(|| error(INTERNAL_ERROR, "native runtime identity absent"))?;
+    let text = |pointer: *const c_char, length: usize| -> Result<String, Error> {
+        if pointer.is_null() || !(1..=65536).contains(&length) {
+            return Err(error(INTERNAL_ERROR, "invalid native runtime identity"));
+        }
+        // Length-bounded span inside the live selection snapshot.
+        let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), length) };
+        if bytes.contains(&0) {
+            return Err(error(INTERNAL_ERROR, "invalid native runtime identity"));
+        }
+        String::from_utf8(bytes.to_vec())
+            .map_err(|_| error(INVALID_ARGUMENT, "runtime identity is not UTF-8"))
+    };
+    if server.struct_size as usize != std::mem::size_of::<NativeExpectation>()
+        || server.version != 1
+        || server.reserved != 0
+        || ![1, 2].contains(&server.principal_kind)
+    {
+        return Err(error(INTERNAL_ERROR, "invalid native runtime identity"));
+    }
+    let selected = ServerExpectation {
+        principal_kind: server.principal_kind,
+        principal: text(server.principal, server.principal_length)?,
+        program: text(server.program, server.program_length)?,
+    };
+    drop(selection);
+    if Instant::now() >= deadline {
+        return Err(error(TIMEOUT, "runtime selection deadline expired"));
+    }
+    Ok(selected)
 }
 
 struct Signal(NonNull<c_void>);
@@ -232,6 +330,7 @@ pub struct FrameTransport {
     cancellation: Option<Cancellation>,
     limit: usize,
     server: Option<ServerExpectation>,
+    sessions: bool,
 }
 impl FrameTransport {
     pub fn new(endpoint: impl Into<String>, timeout: Duration) -> Result<Self, Error> {
@@ -249,7 +348,15 @@ impl FrameTransport {
             cancellation: None,
             limit: 1024 * 1024,
             server: None,
+            sessions: false,
         })
+    }
+    /// Keep verified connections for later calls in the shared library's
+    /// session pool (listen/FRAMING.md "Sessions"). Ask only where the server
+    /// answers or closes an oversized header.
+    pub fn with_sessions(mut self, sessions: bool) -> Self {
+        self.sessions = sessions;
+        self
     }
     pub fn with_server_expectation(mut self, server: ServerExpectation) -> Result<Self, Error> {
         if ![1, 2].contains(&server.principal_kind)
@@ -278,8 +385,7 @@ impl FrameTransport {
         self.limit = limit;
         Ok(self)
     }
-    fn open(&self) -> Result<Connection, Error> {
-        version()?;
+    fn millis(&self) -> Result<u32, Error> {
         let remaining = self
             .deadline
             .map(|d| d.saturating_duration_since(Instant::now()))
@@ -287,10 +393,83 @@ impl FrameTransport {
         if remaining.is_zero() {
             return Err(error(TIMEOUT, "call deadline expired"));
         }
-        let millis = remaining
+        Ok(remaining
             .as_millis()
             .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
-            .min(u32::MAX as u128) as u32;
+            .min(u32::MAX as u128) as u32)
+    }
+    fn session_call(&self, frame: &[u8], one_way: bool) -> Result<Vec<u8>, Error> {
+        version()?;
+        if frame.len() > self.limit {
+            return Err(error(INVALID_ARGUMENT, "outbound frame too large"));
+        }
+        let millis = self.millis()?;
+        let signal = self
+            .cancellation
+            .as_ref()
+            .map(|s| s.0 .0.as_ptr())
+            .unwrap_or(ptr::null_mut());
+        let expected = self.server.as_ref().map(|server| NativeExpectation {
+            struct_size: std::mem::size_of::<NativeExpectation>() as u32,
+            version: 1,
+            principal_kind: server.principal_kind,
+            reserved: 0,
+            principal: server.principal.as_ptr().cast(),
+            principal_length: server.principal.len(),
+            program: server.program.as_ptr().cast(),
+            program_length: server.program.len(),
+        });
+        let mut reply = ptr::null_mut();
+        let mut sent = 0usize;
+        // Every span is borrowed for this synchronous call; the reply is owned
+        // by the native library until released below.
+        let status = unsafe {
+            oa_ipc_session_call(
+                self.endpoint.as_ptr().cast(),
+                self.endpoint.len(),
+                millis,
+                signal,
+                expected
+                    .as_ref()
+                    .map_or(ptr::null(), |e| e as *const NativeExpectation),
+                frame.as_ptr().cast(),
+                frame.len(),
+                self.limit as u32,
+                if one_way { CALL_ONE_WAY } else { 0 },
+                &mut reply,
+                &mut sent,
+            )
+        };
+        let bytes = if status == OK && !reply.is_null() {
+            let mut length = 0usize;
+            let data = unsafe { oa_ipc_reply_data(reply, &mut length) };
+            if data.is_null() || length == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(data, length) }.to_vec()
+            }
+        } else {
+            Vec::new()
+        };
+        if !reply.is_null() {
+            unsafe { oa_ipc_reply_release(reply) }
+        }
+        if status != OK {
+            return Err(Error {
+                status,
+                transferred: sent,
+                message: if sent == 0 {
+                    "IPC open failed"
+                } else {
+                    "frame exchange failed; acceptance may be unknown"
+                },
+            });
+        }
+        Ok(bytes)
+    }
+    fn open(&self) -> Result<Connection, Error> {
+        version()?;
+        let millis = self.millis()?;
         let signal = self
             .cancellation
             .as_ref()
@@ -351,6 +530,9 @@ impl FrameTransport {
         Ok(connection)
     }
     pub fn exchange_frame(&self, frame: &[u8]) -> Result<Vec<u8>, Error> {
+        if self.sessions {
+            return self.session_call(frame, false);
+        }
         let mut connection = self.send(frame)?;
         let mut header = [0u8; 4];
         connection.read(&mut header)?;
@@ -363,6 +545,9 @@ impl FrameTransport {
         Ok(reply)
     }
     pub fn write_frame(&self, frame: &[u8]) -> Result<(), Error> {
+        if self.sessions {
+            return self.session_call(frame, true).map(|_| ());
+        }
         let mut connection = self.send(frame)?;
         match connection.read(&mut [0]) {
             Err(e) if e.status == DISCONNECTED => Ok(()),
@@ -485,6 +670,28 @@ mod tests {
                 .status,
             INVALID_ARGUMENT
         );
+    }
+    #[test]
+    fn selection_answers_with_an_identity_or_a_trust_refusal() {
+        assert_eq!(
+            select_runtime(Instant::now(), None).unwrap_err().status,
+            TIMEOUT
+        );
+        let signal = Cancellation::new().unwrap();
+        signal.signal();
+        let cancelled = select_runtime(Instant::now() + Duration::from_secs(1), Some(&signal));
+        assert!(
+            matches!(&cancelled, Err(e) if e.status == CANCELLED),
+            "{cancelled:?}"
+        );
+        // This host may or may not hold an installation; either answer is typed.
+        match select_runtime(Instant::now() + Duration::from_secs(5), None) {
+            Ok(server) => {
+                assert_eq!(server.principal_kind, if cfg!(windows) { 1 } else { 2 });
+                assert!(std::path::Path::new(&server.program).is_absolute());
+            }
+            Err(e) => assert!([UNTRUSTED, PROOF_UNAVAILABLE].contains(&e.status), "{e}"),
+        }
     }
     #[test]
     fn cancelled_before_open() {

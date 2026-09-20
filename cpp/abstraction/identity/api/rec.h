@@ -15,6 +15,94 @@ namespace abstraction::identity::api {
 
 using Raw = std::string;
 
+class Refusal : public std::runtime_error {
+public:
+    Refusal(const char* word, std::size_t offset)
+        : std::runtime_error(std::string("refused: ") + word + " at byte " + std::to_string(offset)),
+          word(word),
+          offset(offset) {}
+    const char* word;
+    std::size_t offset;
+};
+
+enum class Proof : std::int32_t {
+    None = 1,
+    Claimed = 2,
+    Invalid = 3,
+    Unsigned = 4,
+    Unmet = 5,
+    Pid = 6,
+    Bound = 7,
+    Kernel = 8,
+    Signed = 9,
+};
+
+// The member's name on the wire; empty for a value that names no member.
+inline constexpr std::string_view wire_name(Proof value) {
+    switch (value) {
+        case Proof::None: return "none";
+        case Proof::Claimed: return "claimed";
+        case Proof::Invalid: return "invalid";
+        case Proof::Unsigned: return "unsigned";
+        case Proof::Unmet: return "unmet";
+        case Proof::Pid: return "pid";
+        case Proof::Bound: return "bound";
+        case Proof::Kernel: return "kernel";
+        case Proof::Signed: return "signed";
+    }
+    return {};
+}
+
+// The member a wire name spells; empty for a name this vocabulary refuses.
+inline std::optional<Proof> parse_proof(std::string_view name) {
+    if (name == "none") return Proof::None;
+    if (name == "claimed") return Proof::Claimed;
+    if (name == "invalid") return Proof::Invalid;
+    if (name == "unsigned") return Proof::Unsigned;
+    if (name == "unmet") return Proof::Unmet;
+    if (name == "pid") return Proof::Pid;
+    if (name == "bound") return Proof::Bound;
+    if (name == "kernel") return Proof::Kernel;
+    if (name == "signed") return Proof::Signed;
+    return std::nullopt;
+}
+
+// A member equals its wire name, so code holding the contract's word compares directly.
+inline constexpr bool operator==(Proof value, std::string_view name) { return wire_name(value) == name; }
+inline constexpr bool operator!=(Proof value, std::string_view name) { return wire_name(value) != name; }
+inline constexpr bool operator==(std::string_view name, Proof value) { return wire_name(value) == name; }
+inline constexpr bool operator!=(std::string_view name, Proof value) { return wire_name(value) != name; }
+
+inline const std::vector<std::string> kProofNames = {"none", "claimed", "invalid", "unsigned", "unmet", "pid", "bound", "kernel", "signed"};
+
+inline const std::vector<std::string> kNativeOperations = {"OfHandle", "OfConn", "CanEver", "Check", "Get", "AtLeast"};
+
+inline const std::vector<std::string> kNativeBindingTypes = {"Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options"};
+
+// Minimum proof for each native Peer attribute. Policy comparison uses the
+// declared native order. A serialized requirement or proof name never supplies
+// caller identity; native bindings derive values from the accepted connection.
+struct ProofRequirement {
+    Proof user{};
+    Proof process{};
+    Proof path{};
+    Proof package{};
+    Proof code{};
+};
+
+// Diagnostic refusal metadata. Underlying native attribute and connection
+// evidence remain inseparable; this record cannot create authenticated
+// evidence.
+struct ProofFailure {
+    std::string attribute;
+    Proof have{};
+    Proof need{};
+    std::string why;
+};
+
+// Codec machinery. Nothing here is API; it may change in any release.
+namespace detail {
+
 inline void esc(std::string& out, const std::string& s);
 
 inline void esc_byte(std::string& out, unsigned char c) {
@@ -56,6 +144,8 @@ inline void strs(std::string& out, const std::vector<std::string>& v, int depth)
     pad(out, depth);
     out += ']';
 }
+
+
 
 inline bool ws(unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
@@ -131,89 +221,53 @@ inline void esc(std::string& out, const std::string& s) {
     for (unsigned char c : s) esc_byte(out, c);
     out += '"';
 }
+inline void enc_proof_requirement(std::string&, const ProofRequirement&, int);
+inline void enc_proof_failure(std::string&, const ProofFailure&, int);
 
-class Refusal : public std::runtime_error {
-public:
-    Refusal(const char* word, std::size_t offset)
-        : std::runtime_error(std::string("refused: ") + word + " at byte " + std::to_string(offset)),
-          word(word),
-          offset(offset) {}
-    const char* word;
-    std::size_t offset;
-};
-
-inline const std::vector<std::string> kProofNames = {"none", "claimed", "invalid", "unsigned", "unmet", "pid", "bound", "kernel", "signed"};
-inline const std::string kProofUnknown = "refuse";
-
-inline const std::vector<std::string> kNativeOperations = {"OfHandle", "OfConn", "CanEver", "Check", "Get", "AtLeast"};
-
-inline const std::vector<std::string> kNativeBindingTypes = {"Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options"};
-
-// Minimum proof for each native Peer attribute. Policy comparison uses the
-// declared native order. A serialized requirement or proof name never supplies
-// caller identity; native bindings derive values from the accepted connection.
-struct ProofRequirement {
-    std::string user;
-    std::string process;
-    std::string path;
-    std::string package;
-    std::string code;
-};
-
-// Diagnostic refusal metadata. Underlying native attribute and connection
-// evidence remain inseparable; this record cannot create authenticated
-// evidence.
-struct ProofFailure {
-    std::string attribute;
-    std::string have;
-    std::string need;
-    std::string why;
-};
-
-inline void enc_proofrequirement(std::string& out, const ProofRequirement& v, int depth) {
-    if (v.user != "none" && v.user != "claimed" && v.user != "invalid" && v.user != "unsigned" && v.user != "unmet" && v.user != "pid" && v.user != "bound" && v.user != "kernel" && v.user != "signed") { throw Refusal("bad_enum",0); }
-    if (v.process != "none" && v.process != "claimed" && v.process != "invalid" && v.process != "unsigned" && v.process != "unmet" && v.process != "pid" && v.process != "bound" && v.process != "kernel" && v.process != "signed") { throw Refusal("bad_enum",0); }
-    if (v.path != "none" && v.path != "claimed" && v.path != "invalid" && v.path != "unsigned" && v.path != "unmet" && v.path != "pid" && v.path != "bound" && v.path != "kernel" && v.path != "signed") { throw Refusal("bad_enum",0); }
-    if (v.package != "none" && v.package != "claimed" && v.package != "invalid" && v.package != "unsigned" && v.package != "unmet" && v.package != "pid" && v.package != "bound" && v.package != "kernel" && v.package != "signed") { throw Refusal("bad_enum",0); }
-    if (v.code != "none" && v.code != "claimed" && v.code != "invalid" && v.code != "unsigned" && v.code != "unmet" && v.code != "pid" && v.code != "bound" && v.code != "kernel" && v.code != "signed") { throw Refusal("bad_enum",0); }
+inline void enc_proof_requirement(std::string& out, const ProofRequirement& v, int depth) {
+    if (wire_name(v.user).empty()) throw Refusal("bad_enum", 0);
+    if (wire_name(v.process).empty()) throw Refusal("bad_enum", 0);
+    if (wire_name(v.path).empty()) throw Refusal("bad_enum", 0);
+    if (wire_name(v.package).empty()) throw Refusal("bad_enum", 0);
+    if (wire_name(v.code).empty()) throw Refusal("bad_enum", 0);
     out += '{';
     out += '\n';
     pad(out, depth + 1);
     esc(out, "user");
     out += ": ";
-    esc(out, v.user);
+    esc(out, std::string(wire_name(v.user)));
     out += ',';
     out += '\n';
     pad(out, depth + 1);
     esc(out, "process");
     out += ": ";
-    esc(out, v.process);
+    esc(out, std::string(wire_name(v.process)));
     out += ',';
     out += '\n';
     pad(out, depth + 1);
     esc(out, "path");
     out += ": ";
-    esc(out, v.path);
+    esc(out, std::string(wire_name(v.path)));
     out += ',';
     out += '\n';
     pad(out, depth + 1);
     esc(out, "package");
     out += ": ";
-    esc(out, v.package);
+    esc(out, std::string(wire_name(v.package)));
     out += ',';
     out += '\n';
     pad(out, depth + 1);
     esc(out, "code");
     out += ": ";
-    esc(out, v.code);
+    esc(out, std::string(wire_name(v.code)));
     out += '\n';
     pad(out, depth);
     out += '}';
 }
 
-inline void enc_prooffailure(std::string& out, const ProofFailure& v, int depth) {
-    if (v.have != "none" && v.have != "claimed" && v.have != "invalid" && v.have != "unsigned" && v.have != "unmet" && v.have != "pid" && v.have != "bound" && v.have != "kernel" && v.have != "signed") { throw Refusal("bad_enum",0); }
-    if (v.need != "none" && v.need != "claimed" && v.need != "invalid" && v.need != "unsigned" && v.need != "unmet" && v.need != "pid" && v.need != "bound" && v.need != "kernel" && v.need != "signed") { throw Refusal("bad_enum",0); }
+inline void enc_proof_failure(std::string& out, const ProofFailure& v, int depth) {
+    if (wire_name(v.have).empty()) throw Refusal("bad_enum", 0);
+    if (wire_name(v.need).empty()) throw Refusal("bad_enum", 0);
     out += '{';
     out += '\n';
     pad(out, depth + 1);
@@ -225,13 +279,13 @@ inline void enc_prooffailure(std::string& out, const ProofFailure& v, int depth)
     pad(out, depth + 1);
     esc(out, "have");
     out += ": ";
-    esc(out, v.have);
+    esc(out, std::string(wire_name(v.have)));
     out += ',';
     out += '\n';
     pad(out, depth + 1);
     esc(out, "need");
     out += ": ";
-    esc(out, v.need);
+    esc(out, std::string(wire_name(v.need)));
     out += ',';
     out += '\n';
     pad(out, depth + 1);
@@ -243,17 +297,8 @@ inline void enc_prooffailure(std::string& out, const ProofFailure& v, int depth)
     out += '}';
 }
 
-inline std::string encode(const ProofRequirement& v) {
-    std::string out;
-    enc_proofrequirement(out, v, 0);
-    out += '\n';
-    return out;
-}
-
 inline constexpr int kDepthLimit = 64;
 inline constexpr std::size_t kI64Digits = 19;
-
-
 
 inline void append_rune(std::string& out, std::uint32_t cp) {
     if (cp < 0x80) {
@@ -547,14 +592,19 @@ struct Reader {
     }
 };
 
-inline ProofRequirement decode_proofrequirement(Reader& r);
-inline ProofFailure decode_prooffailure(Reader& r);
+inline ProofRequirement decode_proof_requirement(Reader& r);
+inline ProofFailure decode_proof_failure(Reader& r);
 
-inline ProofRequirement decode_proofrequirement(Reader& r) {
+inline ProofRequirement decode_proof_requirement(Reader& r) {
     if (r.at() != '{') r.refuse("wrong_type");
     r.enter();
     ++r.pos;
     ProofRequirement v;
+    std::optional<std::string> wire_user;
+    std::optional<std::string> wire_process;
+    std::optional<std::string> wire_path;
+    std::optional<std::string> wire_package;
+    std::optional<std::string> wire_code;
     std::uint32_t seen = 0;
     r.skip_ws();
     if (r.at() != '}') {
@@ -569,23 +619,23 @@ inline ProofRequirement decode_proofrequirement(Reader& r) {
             if (key == "user") {
                 if (seen & 1u) r.refuse("duplicate_field");
                 seen |= 1u;
-                v.user = r.str();
+                wire_user = r.str();
             } else if (key == "process") {
                 if (seen & 2u) r.refuse("duplicate_field");
                 seen |= 2u;
-                v.process = r.str();
+                wire_process = r.str();
             } else if (key == "path") {
                 if (seen & 4u) r.refuse("duplicate_field");
                 seen |= 4u;
-                v.path = r.str();
+                wire_path = r.str();
             } else if (key == "package") {
                 if (seen & 8u) r.refuse("duplicate_field");
                 seen |= 8u;
-                v.package = r.str();
+                wire_package = r.str();
             } else if (key == "code") {
                 if (seen & 16u) r.refuse("duplicate_field");
                 seen |= 16u;
-                v.code = r.str();
+                wire_code = r.str();
             } else {
                 r.refuse("unknown_field");
             }
@@ -598,19 +648,41 @@ inline ProofRequirement decode_proofrequirement(Reader& r) {
     ++r.pos;
     --r.depth;
     if ((seen & 31u) != 31u) r.refuse("missing_field");
-    if (v.user != "none" && v.user != "claimed" && v.user != "invalid" && v.user != "unsigned" && v.user != "unmet" && v.user != "pid" && v.user != "bound" && v.user != "kernel" && v.user != "signed") { r.refuse("bad_enum"); }
-    if (v.process != "none" && v.process != "claimed" && v.process != "invalid" && v.process != "unsigned" && v.process != "unmet" && v.process != "pid" && v.process != "bound" && v.process != "kernel" && v.process != "signed") { r.refuse("bad_enum"); }
-    if (v.path != "none" && v.path != "claimed" && v.path != "invalid" && v.path != "unsigned" && v.path != "unmet" && v.path != "pid" && v.path != "bound" && v.path != "kernel" && v.path != "signed") { r.refuse("bad_enum"); }
-    if (v.package != "none" && v.package != "claimed" && v.package != "invalid" && v.package != "unsigned" && v.package != "unmet" && v.package != "pid" && v.package != "bound" && v.package != "kernel" && v.package != "signed") { r.refuse("bad_enum"); }
-    if (v.code != "none" && v.code != "claimed" && v.code != "invalid" && v.code != "unsigned" && v.code != "unmet" && v.code != "pid" && v.code != "bound" && v.code != "kernel" && v.code != "signed") { r.refuse("bad_enum"); }
+    if (wire_user) {
+        const auto parsed = parse_proof(*wire_user);
+        if (!parsed) r.refuse("bad_enum");
+        v.user = *parsed;
+    }
+    if (wire_process) {
+        const auto parsed = parse_proof(*wire_process);
+        if (!parsed) r.refuse("bad_enum");
+        v.process = *parsed;
+    }
+    if (wire_path) {
+        const auto parsed = parse_proof(*wire_path);
+        if (!parsed) r.refuse("bad_enum");
+        v.path = *parsed;
+    }
+    if (wire_package) {
+        const auto parsed = parse_proof(*wire_package);
+        if (!parsed) r.refuse("bad_enum");
+        v.package = *parsed;
+    }
+    if (wire_code) {
+        const auto parsed = parse_proof(*wire_code);
+        if (!parsed) r.refuse("bad_enum");
+        v.code = *parsed;
+    }
     return v;
 }
 
-inline ProofFailure decode_prooffailure(Reader& r) {
+inline ProofFailure decode_proof_failure(Reader& r) {
     if (r.at() != '{') r.refuse("wrong_type");
     r.enter();
     ++r.pos;
     ProofFailure v;
+    std::optional<std::string> wire_have;
+    std::optional<std::string> wire_need;
     std::uint32_t seen = 0;
     r.skip_ws();
     if (r.at() != '}') {
@@ -629,11 +701,11 @@ inline ProofFailure decode_prooffailure(Reader& r) {
             } else if (key == "have") {
                 if (seen & 2u) r.refuse("duplicate_field");
                 seen |= 2u;
-                v.have = r.str();
+                wire_have = r.str();
             } else if (key == "need") {
                 if (seen & 4u) r.refuse("duplicate_field");
                 seen |= 4u;
-                v.need = r.str();
+                wire_need = r.str();
             } else if (key == "why") {
                 if (seen & 8u) r.refuse("duplicate_field");
                 seen |= 8u;
@@ -650,20 +722,38 @@ inline ProofFailure decode_prooffailure(Reader& r) {
     ++r.pos;
     --r.depth;
     if ((seen & 15u) != 15u) r.refuse("missing_field");
-    if (v.have != "none" && v.have != "claimed" && v.have != "invalid" && v.have != "unsigned" && v.have != "unmet" && v.have != "pid" && v.have != "bound" && v.have != "kernel" && v.have != "signed") { r.refuse("bad_enum"); }
-    if (v.need != "none" && v.need != "claimed" && v.need != "invalid" && v.need != "unsigned" && v.need != "unmet" && v.need != "pid" && v.need != "bound" && v.need != "kernel" && v.need != "signed") { r.refuse("bad_enum"); }
+    if (wire_have) {
+        const auto parsed = parse_proof(*wire_have);
+        if (!parsed) r.refuse("bad_enum");
+        v.have = *parsed;
+    }
+    if (wire_need) {
+        const auto parsed = parse_proof(*wire_need);
+        if (!parsed) r.refuse("bad_enum");
+        v.need = *parsed;
+    }
     return v;
 }
 
+}  // namespace detail
+
+inline std::string encode(const ProofRequirement& v) {
+    std::string out;
+    detail::enc_proof_requirement(out, v, 0);
+    out += '\n';
+    return out;
+}
+
 inline ProofRequirement decode(std::string_view data) {
-    Reader r{data};
+    detail::Reader r{data};
     r.skip_ws();
-    ProofRequirement v = decode_proofrequirement(r);
+    ProofRequirement v = detail::decode_proof_requirement(r);
     r.skip_ws();
     if (r.pos < r.buf.size()) r.refuse("trailing_bytes");
     return v;
 }
 
+namespace detail {
 // kRefusals is in the order two of them are chosen between.
 inline const std::vector<std::string> kRefusals = {"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "bad_enum", "trailing_bytes"};
 
@@ -672,5 +762,6 @@ inline int refusal_rank(std::string_view word) {
         if (kRefusals[i] == word) return static_cast<int>(i);
     return -1;
 }
+}  // namespace detail
 
 }  // namespace abstraction::identity::api

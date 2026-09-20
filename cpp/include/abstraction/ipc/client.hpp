@@ -11,11 +11,11 @@
 namespace abstraction { namespace ipc {
 using Clock = std::chrono::steady_clock;
 using Deadline = Clock::time_point;
-enum class Status { ok = OA_IPC_OK, timeout = OA_IPC_TIMEOUT,
-    disconnected = OA_IPC_DISCONNECTED, io_error = OA_IPC_IO_ERROR,
-    invalid_argument = OA_IPC_INVALID_ARGUMENT, no_memory = OA_IPC_NO_MEMORY,
-    internal_error = OA_IPC_INTERNAL_ERROR, cancelled = OA_IPC_CANCELLED,
-    untrusted = OA_IPC_UNTRUSTED, proof_unavailable = OA_IPC_PROOF_UNAVAILABLE };
+enum class Status { Ok = OA_IPC_OK, Timeout = OA_IPC_TIMEOUT,
+    Disconnected = OA_IPC_DISCONNECTED, IoError = OA_IPC_IO_ERROR,
+    InvalidArgument = OA_IPC_INVALID_ARGUMENT, NoMemory = OA_IPC_NO_MEMORY,
+    InternalError = OA_IPC_INTERNAL_ERROR, Cancelled = OA_IPC_CANCELLED,
+    Untrusted = OA_IPC_UNTRUSTED, ProofUnavailable = OA_IPC_PROOF_UNAVAILABLE };
 
 // Independent installation/caller evidence. Values are owned by the copy.
 struct ServerExpectation {
@@ -32,7 +32,8 @@ private:
     std::shared_ptr<oa_ipc_cancellation> handle_;
     friend class CancellationSource;
     friend class Stream;
-    friend ServerExpectation SelectRuntime(Deadline, const CancellationToken&);
+    friend class FrameTransport;
+    friend ServerExpectation select_runtime(Deadline, const CancellationToken&);
 };
 
 class CancellationSource {
@@ -44,8 +45,8 @@ public:
         if (status != OA_IPC_OK) throw std::runtime_error("IPC cancellation creation failed");
         handle_ = std::shared_ptr<oa_ipc_cancellation>(handle, oa_ipc_cancellation_release);
     }
-    CancellationToken Token() const { return CancellationToken(handle_); }
-    void Cancel() const { oa_ipc_cancellation_signal(handle_.get()); }
+    CancellationToken token() const { return CancellationToken(handle_); }
+    void cancel() const { oa_ipc_cancellation_signal(handle_.get()); }
 private:
     std::shared_ptr<oa_ipc_cancellation> handle_;
 };

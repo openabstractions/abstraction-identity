@@ -29,7 +29,7 @@
 namespace abstraction { namespace local_stream {
 using Clock = std::chrono::steady_clock;
 using Deadline = Clock::time_point;
-enum class Status { ok, timeout, disconnected, io_error, cancelled };
+enum class Status { Ok, Timeout, Disconnected, IoError, Cancelled };
 namespace detail {
 inline int remaining_ms(Deadline deadline) {
     auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
@@ -187,22 +187,22 @@ public:
     Stream(const std::string& path, Deadline deadline, std::shared_ptr<Cancellation> cancellation = {})
         : deadline_(deadline), cancellation_(std::move(cancellation)) {
         if (!budget()) return;
-        if (path.find('\0') != std::string::npos) { status_ = Status::io_error; return; }
+        if (path.find('\0') != std::string::npos) { status_ = Status::IoError; return; }
 #ifdef _WIN32
         const std::string prefix = "\\\\.\\pipe\\";
         if (path.size() <= prefix.size() || path.compare(0, prefix.size(), prefix) != 0) {
-            status_ = Status::io_error; return;
+            status_ = Status::IoError; return;
         }
         // Discovery's published pipe names are ASCII. Reject other spelling
         // explicitly until a shared runtime defines endpoint text encoding.
-        for (unsigned char c : path) if (c > 127) { status_ = Status::io_error; return; }
+        for (unsigned char c : path) if (c > 127) { status_ = Status::IoError; return; }
         handle_ = detail::open_pipe(path, deadline_, cancellation_.get());
         if (handle_ == INVALID_HANDLE_VALUE) fail();
         else ::GetSystemTimeAsFileTime(&connected_at_);
 #else
         sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
-        if (path.size() >= sizeof(addr.sun_path)) { status_ = Status::io_error; return; }
+        if (path.size() >= sizeof(addr.sun_path)) { status_ = Status::IoError; return; }
         std::memcpy(addr.sun_path, path.c_str(), path.size());
         handle_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
         if (handle_ < 0) { fail(); return; }
@@ -234,7 +234,25 @@ public:
     int native_handle() const { return handle_; }
 #endif
     bool check_budget() { return valid() && budget(); }
-    bool valid() const { return status_ == Status::ok; }
+    // A healthy stream kept for another call takes that call's budget and
+    // cancellation. A failed stream stays failed.
+    void rearm(Deadline deadline, std::shared_ptr<Cancellation> cancellation) {
+        deadline_ = deadline;
+        cancellation_ = std::move(cancellation);
+    }
+    // Whether an idle stream has nothing to read and has not been ended.
+    bool idle_intact() const {
+        if (!valid()) return false;
+#ifdef _WIN32
+        DWORD available = 0;
+        return ::PeekNamedPipe(handle_, nullptr, 0, nullptr, &available, nullptr) && available == 0;
+#else
+        char byte;
+        const ssize_t n = ::recv(handle_, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+        return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+#endif
+    }
+    bool valid() const { return status_ == Status::Ok; }
     Status status() const { return status_; }
     bool write_all(std::string_view bytes, std::size_t* transferred = nullptr) {
         if (transferred) *transferred = 0;
@@ -255,7 +273,7 @@ public:
                 return fail();
             }
 #endif
-            if (moved == 0) { status_ = Status::disconnected; return false; }
+            if (moved == 0) { status_ = Status::Disconnected; return false; }
             sent += static_cast<std::size_t>(moved);
             if (transferred) *transferred = sent;
         }
@@ -265,7 +283,7 @@ public:
     bool read_some(void* buffer, std::size_t capacity, std::size_t& moved) {
         moved = 0;
         if (!valid()) return false;
-        if (!buffer || capacity == 0) { status_ = Status::io_error; return false; }
+        if (!buffer || capacity == 0) { status_ = Status::IoError; return false; }
         for (;;) {
             if (!budget()) return false;
             const auto count = std::min<std::size_t>(capacity, INT_MAX);
@@ -280,16 +298,16 @@ public:
                 return fail();
             }
 #endif
-            if (n == 0) { status_ = Status::disconnected; return false; }
+            if (n == 0) { status_ = Status::Disconnected; return false; }
             moved = static_cast<std::size_t>(n);
             return true;
         }
     }
 private:
     bool budget() {
-        if (cancellation_ && cancellation_->requested()) {status_=Status::cancelled;return false;}
+        if (cancellation_ && cancellation_->requested()) {status_=Status::Cancelled;return false;}
         if (detail::remaining_ms(deadline_) > 0) return true;
-        status_ = Status::timeout;
+        status_ = Status::Timeout;
         return false;
     }
     bool fail() {
@@ -300,16 +318,16 @@ private:
 #endif
         if (!budget()) return false;
 #ifdef _WIN32
-        if (err == ERROR_TIMEOUT) { status_ = Status::timeout; return false; }
-        status_ = (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED) ? Status::disconnected : Status::io_error;
+        if (err == ERROR_TIMEOUT) { status_ = Status::Timeout; return false; }
+        status_ = (err == ERROR_BROKEN_PIPE || err == ERROR_PIPE_NOT_CONNECTED) ? Status::Disconnected : Status::IoError;
 #else
-        status_ = (err == EPIPE || err == ECONNRESET) ? Status::disconnected : Status::io_error;
+        status_ = (err == EPIPE || err == ECONNRESET) ? Status::Disconnected : Status::IoError;
 #endif
         return false;
     }
     Deadline deadline_;
     std::shared_ptr<Cancellation> cancellation_;
-    Status status_ = Status::ok;
+    Status status_ = Status::Ok;
 #ifdef _WIN32
     HANDLE handle_ = INVALID_HANDLE_VALUE;
     FILETIME connected_at_{};

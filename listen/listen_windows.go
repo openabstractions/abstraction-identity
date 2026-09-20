@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -21,8 +22,6 @@ var (
 	createNamedPipe  = kernel32.NewProc("CreateNamedPipeW")
 	connectNamedPipe = kernel32.NewProc("ConnectNamedPipe")
 	cancelIoEx       = kernel32.NewProc("CancelIoEx")
-	createEvent      = kernel32.NewProc("CreateEventW")
-	overlappedResult = kernel32.NewProc("GetOverlappedResult")
 	waitNamedPipe    = kernel32.NewProc("WaitNamedPipeW")
 )
 
@@ -129,34 +128,82 @@ func (l *pipeListener) instance(claim uintptr) (syscall.Handle, error) {
 }
 
 func (l *pipeListener) Accept() (Conn, error) {
+	a, err := l.arm()
+	if err != nil {
+		return nil, err
+	}
+	return l.connected(a)
+}
+
+// armedAccept is one initiated connect. arm and connected are Accept's two
+// halves; they are separate so a test can run them on different OS threads.
+//
+// The connect is issued on whichever OS thread runs arm. On a handle without a
+// completion port Windows queues the request to that thread, and CancelIoEx
+// does not return while that thread is blocked in unrelated synchronous I/O,
+// such as a Go stdin reader the scheduler placed there. Each connect runs
+// through its own completion port, which makes the request independent of the
+// issuing thread.
+type armedAccept struct {
+	h       syscall.Handle
+	port    windows.Handle
+	o       windows.Overlapped
+	cerr    error
+	pending bool
+}
+
+// fileCompletionInformation is FILE_COMPLETION_INFORMATION. A zero port
+// removes a handle's completion port association.
+type fileCompletionInformation struct {
+	Port windows.Handle
+	Key  uintptr
+}
+
+// arm returns holding acceptMu, and holding mu unless the connect is pending.
+func (l *pipeListener) arm() (*armedAccept, error) {
 	// One pending instance has one accept owner, including while Close cancels it.
 	l.acceptMu.Lock()
-	defer l.acceptMu.Unlock()
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
+		l.acceptMu.Unlock()
 		return nil, net.ErrClosed
 	}
-	h := l.waiting
-	ev, _, err := createEvent.Call(0, 1, 0, 0)
-	if ev == 0 {
+	port, err := windows.CreateIoCompletionPort(windows.Handle(l.waiting), 0, 0, 1)
+	if err != nil {
 		l.mu.Unlock()
+		l.acceptMu.Unlock()
 		return nil, err
 	}
-	defer syscall.CloseHandle(syscall.Handle(ev))
-	o := syscall.Overlapped{HEvent: syscall.Handle(ev)}
+	a := &armedAccept{h: l.waiting, port: port}
 	// Initiate while ownership is locked: Close cannot retire h before this call.
-	r, _, cerr := connectNamedPipe.Call(uintptr(h), uintptr(unsafe.Pointer(&o)))
+	r, _, cerr := connectNamedPipe.Call(uintptr(a.h), uintptr(unsafe.Pointer(&a.o)))
 	if r != 0 || errors.Is(cerr, errPipeConnected) {
 		cerr = nil
 	} else if errors.Is(cerr, syscall.ERROR_IO_PENDING) {
+		a.pending = true
 		l.accepting = true
 		l.mu.Unlock()
+	}
+	a.cerr = cerr
+	return a, nil
+}
+
+func (l *pipeListener) connected(a *armedAccept) (Conn, error) {
+	defer l.acceptMu.Unlock()
+	defer windows.CloseHandle(a.port)
+	h, cerr := a.h, a.cerr
+	if a.pending {
 		var n uint32
-		r, _, cerr = overlappedResult.Call(uintptr(h), uintptr(unsafe.Pointer(&o)), uintptr(unsafe.Pointer(&n)), 1)
-		if r != 0 {
-			cerr = nil
-		}
+		var key uintptr
+		var o *windows.Overlapped
+		// This port carries one handle and one pending request: this connect.
+		cerr = windows.GetQueuedCompletionStatus(a.port, &n, &key, &o, windows.INFINITE)
+		// The kernel held &a.o until this completion and wrote its status there.
+		// Nothing below reads a, so without this the collector may free and reuse
+		// that memory while the connect is pending, and the completion then
+		// overwrites another object.
+		runtime.KeepAlive(a)
 		l.mu.Lock()
 		l.accepting = false
 	}
@@ -179,6 +226,14 @@ func (l *pipeListener) Accept() (Conn, error) {
 		syscall.CloseHandle(h)
 		return nil, errConnect
 	}
+	// os.NewFile joins the handle to the runtime poller, and a handle belongs to
+	// one completion port at a time. Nothing is pending on it now.
+	var info fileCompletionInformation
+	if err := windows.NtSetInformationFile(windows.Handle(h), &windows.IO_STATUS_BLOCK{},
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), windows.FileReplaceCompletionInformation); err != nil {
+		syscall.CloseHandle(h)
+		return nil, fmt.Errorf("listen: the connected pipe could not leave its accept port: %w", err)
+	}
 	return &pipeConn{File: os.NewFile(uintptr(h), "pipe"), h: h, at: at}, nil
 }
 
@@ -192,7 +247,7 @@ func (l *pipeListener) Close() error {
 	h := l.waiting
 	l.waiting = 0
 	if l.accepting {
-		// Accept owns this handle until GetOverlappedResult drains cancellation.
+		// Accept owns this handle until its completion port drains cancellation.
 		cancelIoEx.Call(uintptr(h), 0)
 		return nil
 	}

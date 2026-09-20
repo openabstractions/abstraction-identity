@@ -12,15 +12,15 @@ int main(){using namespace abstraction::ipc;
 #endif
  ServerExpectation server{kind,fixture_principal(),fixture_program()};
  auto endpoint=fixture_begin(1);
- auto transport=FrameTransport(endpoint).WithServerExpectation(server);
+ auto transport=FrameTransport(endpoint).with_server_expectation(server);
  server.program="changed caller-owned value";
- try{if(transport.ExchangeFrame("payload")!="payload")return 1;}catch(const FrameError&e){std::cerr<<int(e.status);return 2;}
+ try{if(transport.exchange_frame("payload")!="payload")return 1;}catch(const FrameError&e){std::cerr<<int(e.status);return 2;}
  if(fixture_finish()!=11)return 3;
  for(int i=0;i<2;++i){
   endpoint=fixture_begin(0);ServerExpectation bad{kind,fixture_principal(),fixture_program()};bad.principal=kind==1?"S-1-0-0":"4294967294";
-  auto rejected=FrameTransport(endpoint,Clock::now()+std::chrono::seconds(1)).WithServerExpectation(bad);
-  if(i){CancellationSource source;rejected=rejected.WithCancellation(source.Token());}
-  try{rejected.ExchangeFrame("private");return 4;}catch(const FrameError&e){if(e.status!=Status::untrusted)return 5;}
+  auto rejected=FrameTransport(endpoint,Clock::now()+std::chrono::seconds(1)).with_server_expectation(bad);
+  if(i){CancellationSource source;rejected=rejected.with_cancellation(source.token());}
+  try{rejected.exchange_frame("private");return 4;}catch(const FrameError&e){if(e.status!=Status::Untrusted)return 5;}
   if(fixture_finish()!=0)return 6;
  }
  std::cout<<"PASS verified C++ frame copy and pre-payload refusal\n";

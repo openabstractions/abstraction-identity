@@ -1,12 +1,18 @@
 # abstraction-identity
 
-**In development.** No tagged release; the Windows, macOS and Linux
-implementations here are exercised but carry no version yet.
+Let a local service verify which account and executable connected before it
+reads a protected request. Each fact records how strongly the operating system
+proved it. A service that needs executable-level proof receives no identity when
+the platform can prove only the user or process.
 
-Every attribute a service learns about the program on the other end of a local
-connection — user, process, path, package, code — arrives welded to a proof of
-how strongly the platform established it, and there is no way to read the value
-without the proof.
+The shared native IPC transport composes this package before parsing a
+capability request. Applications normally consume the resulting authorization
+and attribution through capability clients. Service and transport authors use
+`Peer`, `Proof`, `CanEver` and the native listener directly.
+
+**In development.** Windows and Linux provide the Program proof used by current
+protected service tests. The macOS Unix peer path cannot bind an executable to
+the connection and protected calls fail closed. No tagged release exists yet.
 
 ## The problem
 

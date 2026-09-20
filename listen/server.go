@@ -121,6 +121,24 @@ func (c *serverConn) checkLocked() error {
 	return nil
 }
 
+// use binds a pooled connection to one call: its context for checks and
+// cancellation, and its deadline. The returned stop detaches the call and
+// reports false when cancellation already closed the connection.
+func (c *serverConn) use(ctx context.Context) (func() bool, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, net.ErrClosed
+	}
+	c.ctx = ctx
+	c.mu.Unlock()
+	deadline, _ := ctx.Deadline()
+	if err := c.Conn.SetDeadline(deadline); err != nil {
+		return nil, err
+	}
+	return context.AfterFunc(ctx, func() { c.Close() }), nil
+}
+
 func (c *serverConn) check() error { c.mu.Lock(); defer c.mu.Unlock(); return c.checkLocked() }
 func (c *serverConn) Read(p []byte) (int, error) {
 	if err := c.check(); err != nil {

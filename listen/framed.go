@@ -32,9 +32,22 @@ func writeFrame(w io.Writer, frame []byte, limit uint32) error {
 	if uint64(len(frame)) > uint64(limit) {
 		return ErrFrameTooLarge
 	}
+	return writeHeaded(w, uint32(len(frame)), frame)
+}
+
+// writeHeaded writes a header value and its payload, in one write when the
+// payload is small: each write is a system call, and on some hosts a wakeup.
+func writeHeaded(w io.Writer, header uint32, frame []byte) error {
 	var h [4]byte
-	binary.BigEndian.PutUint32(h[:], uint32(len(frame)))
-	for _, part := range [][]byte{h[:], frame} {
+	binary.BigEndian.PutUint32(h[:], header)
+	parts := [][]byte{h[:], frame}
+	if len(frame) <= 64<<10 {
+		joined := make([]byte, 4+len(frame))
+		copy(joined, h[:])
+		copy(joined[4:], frame)
+		parts = [][]byte{joined}
+	}
+	for _, part := range parts {
 		for len(part) > 0 {
 			n, err := w.Write(part)
 			if err != nil {
@@ -126,6 +139,13 @@ type FrameClient struct {
 	// Nil uses the local platform dialer. Remote identities belong to their
 	// transport; a custom Dialer cannot be combined with local Server evidence.
 	Dialer func(context.Context, string) (net.Conn, error)
+	// Sessions asks the endpoint, through the local platform dialer, to keep
+	// the verified connection for later calls, and keeps it in a bounded
+	// per-endpoint pool (FRAMING.md "Sessions"). A server that closes the
+	// request unanswered is served one connection per call. Leave it false
+	// for a server that may neither serve sessions nor close an oversized
+	// header, which would make the first call wait for its deadline.
+	Sessions bool
 }
 
 // WithContext adapts generated context-free transport interfaces for one call.
@@ -198,6 +218,13 @@ func (c FrameClient) WriteFrameContext(parent context.Context, frame []byte) err
 	}
 	ctx, cancel := frameContext(parent, c.Timeout)
 	defer cancel()
+	if c.sessions(len(frame)) {
+		_, err := c.sessionCall(ctx, frame, limit, true)
+		if !errors.Is(err, errNoSession) {
+			return frameError(ctx, err)
+		}
+		frames.markSingle(c.poolKey(), time.Now())
+	}
 	conn, close, err := c.connect(ctx)
 	if err != nil {
 		return frameError(ctx, err)
@@ -208,6 +235,13 @@ func (c FrameClient) WriteFrameContext(parent context.Context, frame []byte) err
 	}
 	return frameError(ctx, err)
 }
+
+// sessions reports whether a call asks for a session: Sessions, the local
+// dialer, and an endpoint not known to refuse them.
+func (c FrameClient) sessions(length int) bool {
+	return c.Sessions && c.Dialer == nil && uint64(length) <= uint64(lengthMask) &&
+		!frames.isSingle(c.poolKey(), time.Now())
+}
 func (c FrameClient) ExchangeFrameContext(parent context.Context, frame []byte) ([]byte, error) {
 	limit := frameLimit(c.MaxFrame)
 	if uint64(len(frame)) > uint64(limit) {
@@ -215,6 +249,13 @@ func (c FrameClient) ExchangeFrameContext(parent context.Context, frame []byte) 
 	}
 	ctx, cancel := frameContext(parent, c.Timeout)
 	defer cancel()
+	if c.sessions(len(frame)) {
+		reply, err := c.sessionCall(ctx, frame, limit, false)
+		if !errors.Is(err, errNoSession) {
+			return reply, frameError(ctx, err)
+		}
+		frames.markSingle(c.poolKey(), time.Now())
+	}
 	conn, close, err := c.connect(ctx)
 	if err != nil {
 		return nil, frameError(ctx, err)
@@ -328,6 +369,14 @@ func ReceiveFramed(parent context.Context, c Conn, need identity.Need, maxFrame 
 		return fail(err)
 	}
 	n := binary.BigEndian.Uint32(h[:])
+	if n&sessionFlag != 0 && n != sessionClosing {
+		// A session request to a connection served once: say so, and serve
+		// this one exchange (FRAMING.md "Sessions").
+		if err := writeUint32(c, sessionUnsupported); err != nil {
+			return fail(err)
+		}
+		n &= lengthMask
+	}
 	if n > k.limit {
 		return fail(ErrFrameTooLarge)
 	}

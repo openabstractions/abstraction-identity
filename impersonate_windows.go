@@ -150,7 +150,7 @@ func peerUser(pipe windows.Handle) (User, string, error) {
 		UID: -1, GID: -1,
 	}
 	why := ""
-	if name, domain, _, err := sid.LookupAccount(""); err == nil {
+	if name, domain, err := accountName(sid); err == nil {
 		user.Name, user.Domain = name, domain
 	} else {
 		why = "the SID has no resolvable account name (" + err.Error() + "); the SID itself is unaffected"

@@ -1,6 +1,13 @@
 # Shared IPC client byte transport
 
-`abstraction_ipc` / `abstraction::ipc` supplies client connection I/O over local Windows named pipes and POSIX Unix sockets. This is not a C++ implementation of identity's complete proof or authorization API. It supplies neither servers nor framing, service discovery, generated RPC interfaces, nor provider behavior.
+Connect generated C++ service clients to a local OA endpoint with bounded reads,
+writes, deadlines and cancellation. `abstraction_ipc` / `abstraction::ipc` uses
+Windows named pipes or POSIX Unix sockets and exposes a stable C ABI plus a C++17
+RAII wrapper.
+
+This package supplies client byte transport. Server listening, framing, service
+discovery, generated RPC interfaces, provider behavior and authorization remain
+separate components.
 
 The C ABI is in `<abstraction/ipc/client.h>`; its opaque connection is allocated and freed by the same library. Version is `1`. Status values are explicit integers. Buffers belong to callers. A failed open clears the output handle. Close accepts NULL; calls must not race with I/O or another close. Errors and C++ allocation failures return statuses, not exceptions. Invalid arguments perform no I/O.
 
@@ -26,23 +33,23 @@ For a Windows shared build, put the staging `bin` directory on the test process'
 
 ## Per-operation cancellation
 
-`CancellationSource` owns a cancellation handle. `source.Token()` returns a
-copyable token and `source.Cancel()` signals it idempotently from another thread.
+`CancellationSource` owns a cancellation handle. `source.token()` returns a
+copyable token and `source.cancel()` signals it idempotently from another thread.
 Tokens keep the handle alive; a default token is uncancelable. Keep the source
 available while an application needs to signal it. Concurrent assignment or
 destruction of the same C++ object requires external synchronization.
 
 ```cpp
 abstraction::ipc::CancellationSource stop;
-auto operation = transport.WithCancellation(stop.Token());
-// Another thread may call stop.Cancel() while this exchange waits.
-auto reply = operation.ExchangeFrame(request);
+auto operation = transport.with_cancellation(stop.token());
+// Another thread may call stop.cancel() while this exchange waits.
+auto reply = operation.exchange_frame(request);
 ```
 
-`WithCancellation` returns an operation-scoped transport copy and preserves its
+`with_cancellation` returns an operation-scoped transport copy and preserves its
 endpoint, frame limit and deadline. The original transport remains reusable.
 Use a new source for a new cancellation lifetime. Waiting cancellation throws
-`FrameError` with `Status::cancelled`; it leaves provider acceptance or execution
+`FrameError` with `Status::Cancelled`; it leaves provider acceptance or execution
 unresolved and sends no cancel-work request. `Stream(endpoint, deadline, token)`
 uses the same native cancellation mechanism for byte I/O.
 

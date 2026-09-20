@@ -66,36 +66,36 @@ private:
     std::thread worker;std::mutex mu;std::condition_variable cv;bool connected=false,release=false;
 };
 int main(){try{
-    CancellationSource cancelled;cancelled.Cancel();cancelled.Cancel();
+    CancellationSource cancelled;cancelled.cancel();cancelled.cancel();
 #ifdef _WIN32
     FrameTransport absent(R"(\\.\pipe\oa-cancel-absent)",5000);
 #else
     FrameTransport absent("/tmp/oa-cancel-absent",5000);
 #endif
-    auto refused=absent.WithCancellation(cancelled.Token());
-    try{refused.ExchangeFrame("x");require(false,"cancelled open succeeded");}
-    catch(const FrameError& e){require(e.status==Status::cancelled,"cancelled open lost status");}
+    auto refused=absent.with_cancellation(cancelled.token());
+    try{refused.exchange_frame("x");require(false,"cancelled open succeeded");}
+    catch(const FrameError& e){require(e.status==Status::Cancelled,"cancelled open lost status");}
     for(bool writing:{false,true}){
         QuietPeer peer;CancellationSource source;
-        Stream stream(peer.path,Clock::now()+5s,source.Token());require(stream.valid(),"open");peer.Accepted();
+        Stream stream(peer.path,Clock::now()+5s,source.token());require(stream.valid(),"open");peer.Accepted();
         auto waiting=std::async(std::launch::async,[&]{
             if(writing){std::string bytes(16*1024*1024,'x');return stream.write_all(bytes);}
             char byte;size_t moved;return stream.read_some(&byte,1,moved);
         });
         require(waiting.wait_for(50ms)==std::future_status::timeout,"fixture did not hold IO");
-        source.Cancel();
+        source.cancel();
         require(waiting.wait_for(1s)==std::future_status::ready,"cancelled IO stayed blocked");
-        require(!waiting.get() && stream.status()==Status::cancelled,"IO cancellation status");
+        require(!waiting.get() && stream.status()==Status::Cancelled,"IO cancellation status");
     }
     // The unmodified transport and a new token retain normal operation.
     for(bool token:{false,true}){
         FrameTransport ordinary(fixture_start(),2000);
-        auto preCancelled=ordinary.WithCancellation(cancelled.Token());
-        try{preCancelled.ExchangeFrame("abc");require(false,"cancelled copy reached peer");}
-        catch(const FrameError& e){require(e.status==Status::cancelled,"cancelled copy status");}
+        auto preCancelled=ordinary.with_cancellation(cancelled.token());
+        try{preCancelled.exchange_frame("abc");require(false,"cancelled copy reached peer");}
+        catch(const FrameError& e){require(e.status==Status::Cancelled,"cancelled copy status");}
         CancellationSource source;
-        auto operation=token?ordinary.WithCancellation(source.Token()):ordinary;
-        require(operation.ExchangeFrame("abc")=="abc","fresh exchange");
+        auto operation=token?ordinary.with_cancellation(source.token()):ordinary;
+        require(operation.exchange_frame("abc")=="abc","fresh exchange");
         require(fixture_finish(),"echo fixture");
     }
     // Native connection retains cancellation state after the handle is released.

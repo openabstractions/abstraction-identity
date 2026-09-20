@@ -82,6 +82,17 @@ class Library:
         if self._open_verified is not None:
             self._open_verified.restype = C.c_int32
             self._open_verified.argtypes = [C.c_char_p,C.c_size_t,C.c_uint32,C.c_void_p,C.POINTER(_Expectation),C.POINTER(C.c_void_p)]
+        # Session calls (listen/FRAMING.md "Sessions") are an additive ABI-1 extension.
+        self._session_call = getattr(self._dll, "oa_ipc_session_call", None)
+        if self._session_call is not None:
+            self._session_call.restype = C.c_int32
+            self._session_call.argtypes = [C.c_char_p, C.c_size_t, C.c_uint32, C.c_void_p, C.POINTER(_Expectation),
+                                           C.c_char_p, C.c_size_t, C.c_uint32, C.c_uint32,
+                                           C.POINTER(C.c_void_p), C.POINTER(C.c_size_t)]
+            self._reply_data = self._dll.oa_ipc_reply_data
+            self._reply_data.restype, self._reply_data.argtypes = C.c_void_p, [C.c_void_p, C.POINTER(C.c_size_t)]
+            self._reply_release = self._dll.oa_ipc_reply_release
+            self._reply_release.restype, self._reply_release.argtypes = None, [C.c_void_p]
         if self._version() != 1:
             raise RuntimeError("unsupported IPC ABI version")
 
@@ -147,13 +158,17 @@ class Cancellation:
 
 
 class FrameTransport:
-    """One native connection per call, fixed endpoint and bounded frames.
+    """Framed calls on a fixed endpoint with bounded frames.
 
     deadline is an absolute time.monotonic() value shared across calls. Without
     it, each call receives timeout seconds. Cancellation stops waiting only.
+    Each call opens a native connection unless sessions is true: then verified
+    connections are kept for later calls by the shared library's session pool
+    (listen/FRAMING.md "Sessions"). Ask for sessions only where the server
+    answers or closes an oversized header.
     """
     def __init__(self, library, endpoint, *, timeout=5.0, deadline=None,
-                 cancellation=None, max_frame=1024 * 1024, server=None):
+                 cancellation=None, max_frame=1024 * 1024, server=None, sessions=False):
         if not isinstance(endpoint, str) or not endpoint or "\0" in endpoint:
             raise ValueError("nonempty endpoint without NUL required")
         if not isinstance(max_frame, int) or not 1 <= max_frame <= 2 * 1024 * 1024:
@@ -166,7 +181,7 @@ class FrameTransport:
             raise ValueError("cancellation belongs to another library")
         if server is not None and not isinstance(server, ServerExpectation):
             raise ValueError("server must be a ServerExpectation")
-        self.server = server
+        self.server, self.sessions = server, bool(sessions)
         self.library, self.endpoint = library, endpoint.encode("utf-8")
         self.timeout, self.deadline = timeout, deadline
         self.cancellation, self.max_frame = cancellation, max_frame
@@ -180,7 +195,7 @@ class FrameTransport:
         return FrameTransport(
             self.library, self.endpoint.decode("utf-8"), timeout=self.timeout,
             deadline=deadline,
-            cancellation=cancellation, max_frame=self.max_frame, server=self.server)
+            cancellation=cancellation, max_frame=self.max_frame, server=self.server, sessions=self.sessions)
 
     def call_scope(self):
         """Return an independent transport sharing one composite-call deadline.
@@ -192,13 +207,57 @@ class FrameTransport:
         deadline = self.deadline if self.deadline is not None else time.monotonic() + self.timeout
         return FrameTransport(self.library, self.endpoint.decode("utf-8"),
                               timeout=self.timeout, deadline=deadline,
-                              cancellation=self.cancellation, max_frame=self.max_frame, server=self.server)
+                              cancellation=self.cancellation, max_frame=self.max_frame, server=self.server,
+                              sessions=self.sessions)
 
-    def _open(self):
+    def _millis(self):
         seconds = self.timeout if self.deadline is None else self.deadline - time.monotonic()
         if seconds <= 0:
             raise FrameError(TIMEOUT, "call deadline expired")
-        millis = min(4294967295, max(1, math.ceil(seconds * 1000)))
+        return min(4294967295, max(1, math.ceil(seconds * 1000)))
+
+    def _expectation(self):
+        principal, program = self.server.principal.encode("utf-8"), self.server.program.encode("utf-8")
+        return _Expectation(C.sizeof(_Expectation), 1, self.server.principal_kind, 0,
+                            principal, len(principal), program, len(program))
+
+    def _session(self, frame, reply):
+        millis = self._millis()
+        token = self.cancellation
+        if token is not None:
+            with token._lock:
+                if token._closing or not token._handle.value:
+                    raise FrameError(CANCELLED, "cancellation signal closed")
+                token._opening += 1
+                signal = token._handle
+        else:
+            signal = None
+        answer, sent = C.c_void_p(), C.c_size_t()
+        try:
+            expected = self._expectation() if self.server is not None else None
+            status = self.library._session_call(
+                self.endpoint, len(self.endpoint), millis, signal, C.byref(expected) if expected is not None else None,
+                frame, len(frame), self.max_frame, 0 if reply else 1, C.byref(answer), C.byref(sent))
+        finally:
+            if token is not None:
+                with token._lock:
+                    token._opening -= 1
+                    token._condition.notify_all()
+        try:
+            if status != OK:
+                raise FrameError(status, "frame exchange failed; acceptance may be unknown" if sent.value else "IPC open failed",
+                                 sent.value)
+            if not reply:
+                return None
+            length = C.c_size_t()
+            data = self.library._reply_data(answer, C.byref(length))
+            return C.string_at(data, length.value) if length.value else b""
+        finally:
+            if answer.value:
+                self.library._reply_release(answer)
+
+    def _open(self):
+        millis = self._millis()
         handle = C.c_void_p()
         token = self.cancellation
         # Retain a cancellation handle during open; the native connection then
@@ -219,9 +278,7 @@ class FrameTransport:
                 verified = getattr(self.library, "_open_verified", None)
                 if verified is None:
                     raise FrameError(PROOF_UNAVAILABLE, "native server proof unavailable")
-                principal, program = self.server.principal.encode("utf-8"), self.server.program.encode("utf-8")
-                expected = _Expectation(C.sizeof(_Expectation), 1, self.server.principal_kind, 0,
-                                        principal, len(principal), program, len(program))
+                expected = self._expectation()
                 status = verified(self.endpoint, len(self.endpoint), millis, signal, C.byref(expected), C.byref(handle))
         finally:
             if token is not None:
@@ -257,6 +314,8 @@ class FrameTransport:
     def _call(self, frame, reply):
         if not isinstance(frame, bytes) or len(frame) > self.max_frame:
             raise FrameError(INVALID_ARGUMENT, "frame must be bounded bytes")
+        if self.sessions and getattr(self.library, "_session_call", None) is not None:
+            return self._session(frame, reply)
         handle = self._open()
         try:
             self._write(handle, struct.pack("!I", len(frame)) + frame)

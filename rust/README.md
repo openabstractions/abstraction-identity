@@ -1,14 +1,14 @@
 # Rust binding to shared IPC
 
-The raw transport example below is explicitly unverified compatibility. Supply
-`ServerExpectation` from independent host configuration for authenticated local
-use; an endpoint convention alone is not installation trust.
-
-
 This crate depends on the pure `abstraction-frame` contract and wraps the existing native client C ABI. It supplies
 native bootstrap, bounded framed bytes, deadlines and cancellation. Generated
 Rust capability clients use this transport through the shared framing trait.
 Transport evidence and each capability behavior have separate scopes. It contains no service, local provider or per-capability JSON.
+
+For authenticated local use, obtain a `ServerExpectation` from `select_runtime`,
+the shared C ABI selector for the installed runtime, or from independent host
+configuration, and pass it to `with_server_expectation`. The raw transport
+example below uses endpoint-only compatibility selection.
 
 ## Build against an installed native prefix
 

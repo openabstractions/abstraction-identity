@@ -187,27 +187,139 @@ func esc(out []byte, s string) []byte {
 	return append(out, '"')
 }
 
-var ProofNames = []string{"none", "claimed", "invalid", "unsigned", "unmet", "pid", "bound", "kernel", "signed"}
+// Proof is a closed vocabulary. Its numeric values are private implementation
+// tags; String and ParseProof preserve the exact wire words.
+type Proof uint32
 
-const ProofNone = "none"
+const (
+	ProofNone     Proof = 1
+	ProofClaimed  Proof = 2
+	ProofInvalid  Proof = 3
+	ProofUnsigned Proof = 4
+	ProofUnmet    Proof = 5
+	ProofPID      Proof = 6
+	ProofBound    Proof = 7
+	ProofKernel   Proof = 8
+	ProofSigned   Proof = 9
+)
 
-const ProofClaimed = "claimed"
+// String returns v's exact wire word, or the empty string for an invalid value.
+func (v Proof) String() string {
+	word, _ := v.WireName()
+	return word
+}
 
-const ProofInvalid = "invalid"
+// WireName returns v's exact wire word and whether v names a member.
+func (v Proof) WireName() (string, bool) {
+	switch v {
+	case ProofNone:
+		return "none", true
+	case ProofClaimed:
+		return "claimed", true
+	case ProofInvalid:
+		return "invalid", true
+	case ProofUnsigned:
+		return "unsigned", true
+	case ProofUnmet:
+		return "unmet", true
+	case ProofPID:
+		return "pid", true
+	case ProofBound:
+		return "bound", true
+	case ProofKernel:
+		return "kernel", true
+	case ProofSigned:
+		return "signed", true
+	}
+	return "", false
+}
 
-const ProofUnsigned = "unsigned"
+// ParseProof returns the member named by an exact wire word.
+func ParseProof(word string) (Proof, bool) {
+	switch word {
+	case "none":
+		return ProofNone, true
+	case "claimed":
+		return ProofClaimed, true
+	case "invalid":
+		return ProofInvalid, true
+	case "unsigned":
+		return ProofUnsigned, true
+	case "unmet":
+		return ProofUnmet, true
+	case "pid":
+		return ProofPID, true
+	case "bound":
+		return ProofBound, true
+	case "kernel":
+		return ProofKernel, true
+	case "signed":
+		return ProofSigned, true
+	}
+	return Proof(0), false
+}
 
-const ProofUnmet = "unmet"
+// MarshalText preserves the member's exact wire word for standard text users,
+// including JSON object keys. Invalid and zero values are refused.
+func (v Proof) MarshalText() ([]byte, error) {
+	word, ok := v.WireName()
+	if !ok {
+		return nil, &Refusal{Word: "bad_enum", Offset: 0}
+	}
+	return []byte(word), nil
+}
 
-const ProofPid = "pid"
+// UnmarshalText accepts an exact wire word and refuses unknown text.
+func (v *Proof) UnmarshalText(text []byte) error {
+	word, ok := ParseProof(string(text))
+	if !ok {
+		return &Refusal{Word: "bad_enum", Offset: 0}
+	}
+	*v = word
+	return nil
+}
 
-const ProofBound = "bound"
+// MarshalJSON keeps closed vocabularies as JSON strings rather than their
+// private numeric implementation tags.
+func (v Proof) MarshalJSON() ([]byte, error) {
+	word, ok := v.WireName()
+	if !ok {
+		return nil, &Refusal{Word: "bad_enum", Offset: 0}
+	}
+	return esc(nil, word), nil
+}
 
-const ProofKernel = "kernel"
+// UnmarshalJSON accepts only an exact JSON string member. Numbers, null and
+// unknown strings are refused by the same codec rules as generated records.
+func (v *Proof) UnmarshalJSON(data []byte) error {
+	r := reader{buf: data}
+	r.ws()
+	word, err := r.str()
+	if err != nil {
+		return err
+	}
+	r.ws()
+	if r.pos != len(r.buf) {
+		return r.refuse("trailing_bytes")
+	}
+	parsed, ok := ParseProof(word)
+	if !ok {
+		return r.refuse("bad_enum")
+	}
+	*v = parsed
+	return nil
+}
 
-const ProofSigned = "signed"
+// ProofValues returns every member of Proof in declaration order, in a new slice.
+func ProofValues() []Proof {
+	return []Proof{ProofNone, ProofClaimed, ProofInvalid, ProofUnsigned, ProofUnmet, ProofPID, ProofBound, ProofKernel, ProofSigned}
+}
 
-const ProofUnknown = "refuse"
+// Known reports whether v is a member of Proof.
+func (v Proof) Known() bool {
+	_, ok := v.WireName()
+	return ok
+}
 
 var NativeOperations = []string{"OfHandle", "OfConn", "CanEver", "Check", "Get", "AtLeast"}
 
@@ -217,11 +329,11 @@ var NativeBindingTypes = []string{"Handle", "Peer", "Attr<T>", "User", "Process"
 // declared native order. A serialized requirement or proof name never supplies
 // caller identity; native bindings derive values from the accepted connection.
 type ProofRequirement struct {
-	User    string
-	Process string
-	Path    string
-	Package string
-	Code    string
+	User    Proof
+	Process Proof
+	Path    Proof
+	Package Proof
+	Code    Proof
 }
 
 // Diagnostic refusal metadata. Underlying native attribute and connection
@@ -229,25 +341,25 @@ type ProofRequirement struct {
 // evidence.
 type ProofFailure struct {
 	Attribute string
-	Have      string
-	Need      string
+	Have      Proof
+	Need      Proof
 	Why       string
 }
 
 func encProofRequirement(out []byte, v *ProofRequirement, depth int) []byte {
-	if v.User != "none" && v.User != "claimed" && v.User != "invalid" && v.User != "unsigned" && v.User != "unmet" && v.User != "pid" && v.User != "bound" && v.User != "kernel" && v.User != "signed" {
+	if !(v.User).Known() {
 		panic(&Refusal{Word: "bad_enum", Offset: 0})
 	}
-	if v.Process != "none" && v.Process != "claimed" && v.Process != "invalid" && v.Process != "unsigned" && v.Process != "unmet" && v.Process != "pid" && v.Process != "bound" && v.Process != "kernel" && v.Process != "signed" {
+	if !(v.Process).Known() {
 		panic(&Refusal{Word: "bad_enum", Offset: 0})
 	}
-	if v.Path != "none" && v.Path != "claimed" && v.Path != "invalid" && v.Path != "unsigned" && v.Path != "unmet" && v.Path != "pid" && v.Path != "bound" && v.Path != "kernel" && v.Path != "signed" {
+	if !(v.Path).Known() {
 		panic(&Refusal{Word: "bad_enum", Offset: 0})
 	}
-	if v.Package != "none" && v.Package != "claimed" && v.Package != "invalid" && v.Package != "unsigned" && v.Package != "unmet" && v.Package != "pid" && v.Package != "bound" && v.Package != "kernel" && v.Package != "signed" {
+	if !(v.Package).Known() {
 		panic(&Refusal{Word: "bad_enum", Offset: 0})
 	}
-	if v.Code != "none" && v.Code != "claimed" && v.Code != "invalid" && v.Code != "unsigned" && v.Code != "unmet" && v.Code != "pid" && v.Code != "bound" && v.Code != "kernel" && v.Code != "signed" {
+	if !(v.Code).Known() {
 		panic(&Refusal{Word: "bad_enum", Offset: 0})
 	}
 	out = append(out, '{')
@@ -255,41 +367,41 @@ func encProofRequirement(out []byte, v *ProofRequirement, depth int) []byte {
 	out = pad(out, depth+1)
 	out = esc(out, "user")
 	out = append(out, ':', ' ')
-	out = esc(out, v.User)
+	out = esc(out, v.User.String())
 	out = append(out, ',')
 	out = append(out, '\n')
 	out = pad(out, depth+1)
 	out = esc(out, "process")
 	out = append(out, ':', ' ')
-	out = esc(out, v.Process)
+	out = esc(out, v.Process.String())
 	out = append(out, ',')
 	out = append(out, '\n')
 	out = pad(out, depth+1)
 	out = esc(out, "path")
 	out = append(out, ':', ' ')
-	out = esc(out, v.Path)
+	out = esc(out, v.Path.String())
 	out = append(out, ',')
 	out = append(out, '\n')
 	out = pad(out, depth+1)
 	out = esc(out, "package")
 	out = append(out, ':', ' ')
-	out = esc(out, v.Package)
+	out = esc(out, v.Package.String())
 	out = append(out, ',')
 	out = append(out, '\n')
 	out = pad(out, depth+1)
 	out = esc(out, "code")
 	out = append(out, ':', ' ')
-	out = esc(out, v.Code)
+	out = esc(out, v.Code.String())
 	out = append(out, '\n')
 	out = pad(out, depth)
 	return append(out, '}')
 }
 
 func encProofFailure(out []byte, v *ProofFailure, depth int) []byte {
-	if v.Have != "none" && v.Have != "claimed" && v.Have != "invalid" && v.Have != "unsigned" && v.Have != "unmet" && v.Have != "pid" && v.Have != "bound" && v.Have != "kernel" && v.Have != "signed" {
+	if !(v.Have).Known() {
 		panic(&Refusal{Word: "bad_enum", Offset: 0})
 	}
-	if v.Need != "none" && v.Need != "claimed" && v.Need != "invalid" && v.Need != "unsigned" && v.Need != "unmet" && v.Need != "pid" && v.Need != "bound" && v.Need != "kernel" && v.Need != "signed" {
+	if !(v.Need).Known() {
 		panic(&Refusal{Word: "bad_enum", Offset: 0})
 	}
 	out = append(out, '{')
@@ -303,13 +415,13 @@ func encProofFailure(out []byte, v *ProofFailure, depth int) []byte {
 	out = pad(out, depth+1)
 	out = esc(out, "have")
 	out = append(out, ':', ' ')
-	out = esc(out, v.Have)
+	out = esc(out, v.Have.String())
 	out = append(out, ',')
 	out = append(out, '\n')
 	out = pad(out, depth+1)
 	out = esc(out, "need")
 	out = append(out, ':', ' ')
-	out = esc(out, v.Need)
+	out = esc(out, v.Need.String())
 	out = append(out, ',')
 	out = append(out, '\n')
 	out = pad(out, depth+1)
@@ -841,7 +953,11 @@ func (r *reader) decodeProofRequirement() (*ProofRequirement, error) {
 				if err != nil {
 					return nil, err
 				}
-				v.User = x
+				word, ok := ParseProof(x)
+				if !ok {
+					return nil, r.refuse("bad_enum")
+				}
+				v.User = word
 			case "process":
 				if seen&2 != 0 {
 					return nil, r.refuse("duplicate_field")
@@ -851,7 +967,11 @@ func (r *reader) decodeProofRequirement() (*ProofRequirement, error) {
 				if err != nil {
 					return nil, err
 				}
-				v.Process = x
+				word, ok := ParseProof(x)
+				if !ok {
+					return nil, r.refuse("bad_enum")
+				}
+				v.Process = word
 			case "path":
 				if seen&4 != 0 {
 					return nil, r.refuse("duplicate_field")
@@ -861,7 +981,11 @@ func (r *reader) decodeProofRequirement() (*ProofRequirement, error) {
 				if err != nil {
 					return nil, err
 				}
-				v.Path = x
+				word, ok := ParseProof(x)
+				if !ok {
+					return nil, r.refuse("bad_enum")
+				}
+				v.Path = word
 			case "package":
 				if seen&8 != 0 {
 					return nil, r.refuse("duplicate_field")
@@ -871,7 +995,11 @@ func (r *reader) decodeProofRequirement() (*ProofRequirement, error) {
 				if err != nil {
 					return nil, err
 				}
-				v.Package = x
+				word, ok := ParseProof(x)
+				if !ok {
+					return nil, r.refuse("bad_enum")
+				}
+				v.Package = word
 			case "code":
 				if seen&16 != 0 {
 					return nil, r.refuse("duplicate_field")
@@ -881,7 +1009,11 @@ func (r *reader) decodeProofRequirement() (*ProofRequirement, error) {
 				if err != nil {
 					return nil, err
 				}
-				v.Code = x
+				word, ok := ParseProof(x)
+				if !ok {
+					return nil, r.refuse("bad_enum")
+				}
+				v.Code = word
 			default:
 				return nil, r.refuse("unknown_field")
 			}
@@ -900,19 +1032,19 @@ func (r *reader) decodeProofRequirement() (*ProofRequirement, error) {
 	if seen&31 != 31 {
 		return nil, r.refuse("missing_field")
 	}
-	if v.User != "none" && v.User != "claimed" && v.User != "invalid" && v.User != "unsigned" && v.User != "unmet" && v.User != "pid" && v.User != "bound" && v.User != "kernel" && v.User != "signed" {
+	if !(v.User).Known() {
 		return nil, r.refuse("bad_enum")
 	}
-	if v.Process != "none" && v.Process != "claimed" && v.Process != "invalid" && v.Process != "unsigned" && v.Process != "unmet" && v.Process != "pid" && v.Process != "bound" && v.Process != "kernel" && v.Process != "signed" {
+	if !(v.Process).Known() {
 		return nil, r.refuse("bad_enum")
 	}
-	if v.Path != "none" && v.Path != "claimed" && v.Path != "invalid" && v.Path != "unsigned" && v.Path != "unmet" && v.Path != "pid" && v.Path != "bound" && v.Path != "kernel" && v.Path != "signed" {
+	if !(v.Path).Known() {
 		return nil, r.refuse("bad_enum")
 	}
-	if v.Package != "none" && v.Package != "claimed" && v.Package != "invalid" && v.Package != "unsigned" && v.Package != "unmet" && v.Package != "pid" && v.Package != "bound" && v.Package != "kernel" && v.Package != "signed" {
+	if !(v.Package).Known() {
 		return nil, r.refuse("bad_enum")
 	}
-	if v.Code != "none" && v.Code != "claimed" && v.Code != "invalid" && v.Code != "unsigned" && v.Code != "unmet" && v.Code != "pid" && v.Code != "bound" && v.Code != "kernel" && v.Code != "signed" {
+	if !(v.Code).Known() {
 		return nil, r.refuse("bad_enum")
 	}
 	return v, nil
@@ -965,7 +1097,11 @@ func (r *reader) decodeProofFailure() (*ProofFailure, error) {
 				if err != nil {
 					return nil, err
 				}
-				v.Have = x
+				word, ok := ParseProof(x)
+				if !ok {
+					return nil, r.refuse("bad_enum")
+				}
+				v.Have = word
 			case "need":
 				if seen&4 != 0 {
 					return nil, r.refuse("duplicate_field")
@@ -975,7 +1111,11 @@ func (r *reader) decodeProofFailure() (*ProofFailure, error) {
 				if err != nil {
 					return nil, err
 				}
-				v.Need = x
+				word, ok := ParseProof(x)
+				if !ok {
+					return nil, r.refuse("bad_enum")
+				}
+				v.Need = word
 			case "why":
 				if seen&8 != 0 {
 					return nil, r.refuse("duplicate_field")
@@ -1004,10 +1144,10 @@ func (r *reader) decodeProofFailure() (*ProofFailure, error) {
 	if seen&15 != 15 {
 		return nil, r.refuse("missing_field")
 	}
-	if v.Have != "none" && v.Have != "claimed" && v.Have != "invalid" && v.Have != "unsigned" && v.Have != "unmet" && v.Have != "pid" && v.Have != "bound" && v.Have != "kernel" && v.Have != "signed" {
+	if !(v.Have).Known() {
 		return nil, r.refuse("bad_enum")
 	}
-	if v.Need != "none" && v.Need != "claimed" && v.Need != "invalid" && v.Need != "unsigned" && v.Need != "unmet" && v.Need != "pid" && v.Need != "bound" && v.Need != "kernel" && v.Need != "signed" {
+	if !(v.Need).Known() {
 		return nil, r.refuse("bad_enum")
 	}
 	return v, nil
@@ -1027,12 +1167,12 @@ func Decode(in []byte) (*ProofRequirement, error) {
 	return v, nil
 }
 
-// Refusals is in the order two of them are chosen between.
+// refusals is in the order two of them are chosen between.
 
-var Refusals = []string{"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "bad_enum", "trailing_bytes"}
+var refusals = []string{"malformed", "bad_string", "number_spelling", "wrong_type", "depth_exceeded", "duplicate_key", "duplicate_field", "unknown_field", "missing_field", "bad_enum", "trailing_bytes"}
 
-func RefusalRank(word string) int {
-	for i, w := range Refusals {
+func refusalRank(word string) int {
+	for i, w := range refusals {
 		if w == word {
 			return i
 		}

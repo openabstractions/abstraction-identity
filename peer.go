@@ -449,9 +449,11 @@ type Options struct {
 	// hangs is a permission prompt that gets clicked through.
 	CheckRevocation bool
 
-	// SkipCodeSignature skips signature verification entirely. It costs tens
-	// of milliseconds on a cold cache and a service that never asks about
-	// Code should not pay it.
+	// SkipCodeSignature skips signature verification entirely. On Windows
+	// the first verification for a process costs tens of milliseconds, and
+	// more for a large signed image; later connections from the same live
+	// process reuse that verdict (CONTRACT.md). A service that never asks
+	// about Code should not pay it.
 	SkipCodeSignature bool
 
 	// CodeRequirement is a macOS code signing requirement, such as

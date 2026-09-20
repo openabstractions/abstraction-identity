@@ -1,7 +1,7 @@
 {
   "name": "@openabstractions/ipc",
   "version": "0.0.0",
-  "description": "Node-API connector for identity-verified framed local IPC through the shared abstraction C ABI.",
+  "description": "JavaScript connectors for identity-verified framed local IPC through the shared abstraction C ABI.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -13,7 +13,11 @@
     "url": "https://github.com/openabstractions/abstraction-identity/issues"
   },
   "type": "module",
-  "exports": "./index.js",
-  "files": ["index.js", "native/oa_ipc_node.node", "README.md"],
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {"types": "./index.d.ts", "default": "./index.js"},
+    "./bun": {"types": "./bun.d.ts", "default": "./bun.js"}
+  },
+  "files": ["index.js", "index.d.ts", "bun.js", "bun.d.ts", "bun-worker.js", "native/oa_ipc_node.node", "README.md"],
   "engines": {"node": ">=18"}
 }

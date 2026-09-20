@@ -15,8 +15,8 @@
 
 namespace abstraction::ipc {
 namespace process_detail {
-struct close_token { void operator()(void* token) const noexcept { CloseHandle(token); } };
-struct free_sid_text { void operator()(char* text) const noexcept { LocalFree(text); } };
+struct CloseToken { void operator()(void* token) const noexcept { CloseHandle(token); } };
+struct FreeSidText { void operator()(char* text) const noexcept { LocalFree(text); } };
 }
 
 // Local process identity for selecting its user namespace. OpenProcessToken
@@ -25,7 +25,7 @@ inline std::string process_user_sid() {
     HANDLE raw_token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw_token))
         throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "OpenProcessToken");
-    std::unique_ptr<void, process_detail::close_token> token(raw_token);
+    std::unique_ptr<void, process_detail::CloseToken> token(raw_token);
     DWORD size = 0;
     if (GetTokenInformation(token.get(), TokenUser, nullptr, 0, &size))
         throw std::system_error(ERROR_INVALID_DATA, std::system_category(), "TokenUser size");
@@ -41,7 +41,7 @@ inline std::string process_user_sid() {
     char* raw_text = nullptr;
     if (!ConvertSidToStringSidA(user->User.Sid, &raw_text))
         throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "ConvertSidToStringSid");
-    std::unique_ptr<char, process_detail::free_sid_text> text(raw_text);
+    std::unique_ptr<char, process_detail::FreeSidText> text(raw_text);
     return std::string(text.get());
 }
 }

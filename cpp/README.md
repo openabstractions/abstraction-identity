@@ -1,9 +1,33 @@
 # Shared IPC client byte transport
 
+This page is for whoever builds or embeds an OA client transport in C++, or a
+generated C++ service client on top of it. An application calling a capability
+resolves a typed client through the facade instead.
+
+Install the runtime first: https://openabstractions.org/adopt.html
+
 Connect generated C++ service clients to a local OA endpoint with bounded reads,
 writes, deadlines and cancellation. `abstraction_ipc` / `abstraction::ipc` uses
 Windows named pipes or POSIX Unix sockets and exposes a stable C ABI plus a C++17
 RAII wrapper.
+
+On macOS, framed clients also accept an explicit `xpc:service-name` endpoint.
+Supply an independently trusted runtime executable and POSIX user through
+`ServerExpectation`. The shared native transport validates the bootstrap reply
+before sending the capability payload, then uses its anonymous endpoint and
+runtime generation. Each call currently creates a fresh authenticated session.
+The configured executable must be protected by the installation's trust policy.
+An executable supplied by the responding service cannot establish that trust.
+
+This path requires macOS 12 or newer and a registered Mach service.
+Current source uses the installed LaunchAgent's fixed XPC service name as
+the default endpoint on macOS; the published 0.2.0 package predates it. The raw
+`open/read/write` API rejects XPC endpoints; use `FrameTransport` or
+`oa_ipc_session_call`. C++, Python, Rust and Node wrappers check
+`oa_ipc_features()` before routing XPC frames. An older library without that
+feature must be refused before sending data. Bun currently refuses XPC because
+its binding cannot enforce server expectations. Generated capability payloads
+retain their existing form.
 
 This package supplies client byte transport. Server listening, framing, service
 discovery, generated RPC interfaces, provider behavior and authorization remain
@@ -11,7 +35,7 @@ separate components.
 
 The C ABI is in `<abstraction/ipc/client.h>`; its opaque connection is allocated and freed by the same library. Version is `1`. Status values are explicit integers. Buffers belong to callers. A failed open clears the output handle. Close accepts NULL; calls must not race with I/O or another close. Errors and C++ allocation failures return statuses, not exceptions. Invalid arguments perform no I/O.
 
-Open establishes one monotonic deadline from `timeout_ms`; connection setup and all later reads/writes consume that same budget. This is a bounded connection/transaction lifetime, not a persistent connection with a new timeout per call. Zero timeout expires immediately. Read returns at least one byte or a status; EOF is disconnected. Write attempts all bytes and reports confirmed completed bytes. Cancellation can leave an additional indeterminate prefix at the peer: never resend an entire message after a failed write. No message boundaries or delivery acknowledgement are implied.
+Open establishes one monotonic deadline from `timeout_ms`; connection setup and all later reads/writes consume that same budget. This is a bounded connection/transaction lifetime, not a persistent connection with a new timeout per call. Zero timeout expires immediately. Read returns at least one byte or a status; EOF is disconnected. Write attempts all bytes and reports confirmed completed bytes. Cancellation can leave an additional indeterminate prefix at the peer: never resend an entire message after a failed write. No message boundaries or delivery acknowledgement are implied. Frames default to 1 MiB (`kDefaultMaxFrame`) and `max_frame` can raise that up to 2 MiB.
 
 Windows requires a nonempty ASCII `\\.\pipe\name` endpoint. POSIX uses filesystem Unix-socket path bytes subject to the platform length limit. Embedded NUL is invalid argument; unsupported endpoint spelling and connection errors currently map to I/O error. No endpoint path is unlinked by the client. Windows retains SECURITY_IDENTIFICATION and drains cancelled overlapped operations; POSIX suppresses SIGPIPE without changing the process-wide signal disposition.
 

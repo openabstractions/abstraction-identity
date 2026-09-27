@@ -3,6 +3,7 @@
 package identity
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -53,40 +54,70 @@ type codeVerdict struct {
 	at      time.Time
 }
 
+type codeVerification struct {
+	done    chan struct{}
+	code    Code
+	verdict Proof
+	at      time.Time
+	err     error
+}
+
 // verifyFile is verifyImage; tests count verifications through it.
 var verifyFile = verifyImage
 
 var codeVerdicts = struct {
 	sync.Mutex
 	entries map[codeVerdictKey]*codeVerdict
-}{entries: map[codeVerdictKey]*codeVerdict{}}
+	working map[codeVerdictKey]*codeVerification
+}{entries: map[codeVerdictKey]*codeVerdict{}, working: map[codeVerdictKey]*codeVerification{}}
 
 // verifyProcessImage is verifyImage for a pinned peer process, reusing a verdict
 // already reached for this process instance at this image path.
-func verifyProcessImage(proc windows.Handle, pid uint32, started time.Time, imagePath string, opts *Options) (Code, Proof, error) {
-	key := codeVerdictKey{pid: pid, started: started.UnixNano(), image: imagePath, revocation: opts.checkRevocation()}
-	if code, verdict, ok := reusedVerdict(key, time.Now()); ok {
-		return code, verdict, nil
-	}
-	code, verdict, err := verifyFile(proc, imagePath, opts)
-	if err == nil {
-		keepVerdict(key, proc, code, verdict, time.Now())
-	}
+func verifyProcessImage(proc windows.Handle, pid uint32, started time.Time, imagePath string, opts *Options) (code Code, verdict Proof, err error) {
+	code, verdict, _, err = verifyProcessImageAt(proc, pid, started, imagePath, opts)
 	return code, verdict, err
 }
 
-func reusedVerdict(key codeVerdictKey, now time.Time) (Code, Proof, bool) {
+// verifyProcessImageAt also returns when the verdict was verified. A binding
+// reusing this evidence must preserve that original time, not restart its age.
+func verifyProcessImageAt(proc windows.Handle, pid uint32, started time.Time, imagePath string, opts *Options) (code Code, verdict Proof, at time.Time, err error) {
+	key := codeVerdictKey{pid: pid, started: started.UnixNano(), image: imagePath, revocation: opts.checkRevocation()}
 	codeVerdicts.Lock()
-	defer codeVerdicts.Unlock()
-	entry, ok := codeVerdicts.entries[key]
-	if !ok {
-		return Code{}, ProofNone, false
-	}
-	if now.Sub(entry.at) >= codeVerdictLifetime || now.Before(entry.at) {
+	if entry, ok := codeVerdicts.entries[key]; ok {
+		now := time.Now()
+		if now.Sub(entry.at) < codeVerdictLifetime && !now.Before(entry.at) {
+			codeVerdicts.Unlock()
+			return entry.code, entry.verdict, entry.at, nil
+		}
 		dropVerdict(key, entry)
-		return Code{}, ProofNone, false
 	}
-	return entry.code, entry.verdict, true
+	if working := codeVerdicts.working[key]; working != nil {
+		codeVerdicts.Unlock()
+		<-working.done
+		return working.code, working.verdict, working.at, working.err
+	}
+	working := &codeVerification{done: make(chan struct{})}
+	codeVerdicts.working[key] = working
+	codeVerdicts.Unlock()
+
+	completed := false
+	defer func() {
+		if !completed {
+			err = errors.New("identity: code verification interrupted")
+		}
+		codeVerdicts.Lock()
+		working.code, working.verdict, working.at, working.err = code, verdict, at, err
+		delete(codeVerdicts.working, key)
+		close(working.done)
+		codeVerdicts.Unlock()
+	}()
+	code, verdict, err = verifyFile(proc, imagePath, opts)
+	if err == nil {
+		at = time.Now()
+		keepVerdict(key, proc, code, verdict, at)
+	}
+	completed = true
+	return code, verdict, at, err
 }
 
 func keepVerdict(key codeVerdictKey, proc windows.Handle, code Code, verdict Proof, now time.Time) {
@@ -97,6 +128,7 @@ func keepVerdict(key codeVerdictKey, proc windows.Handle, code Code, verdict Pro
 	}
 	// The duplicate must name the process the verification pinned.
 	if started, err := processStartTime(held); err != nil || started.UnixNano() != key.started {
+		//unchecked: best-effort release of a duplicated handle being discarded on this verification-failure path
 		windows.CloseHandle(held)
 		return
 	}
@@ -127,5 +159,6 @@ func keepVerdict(key codeVerdictKey, proc windows.Handle, code Code, verdict Pro
 // dropVerdict requires the codeVerdicts lock.
 func dropVerdict(key codeVerdictKey, entry *codeVerdict) {
 	delete(codeVerdicts.entries, key)
+	//unchecked: best-effort release of an evicted verdict entry's process handle, no caller left to report a close failure to
 	windows.CloseHandle(entry.proc)
 }

@@ -5,6 +5,8 @@
 
 namespace abstraction { namespace ipc {
 constexpr uint32_t kDefaultMaxFrame = 1024 * 1024;
+constexpr uint32_t kWireMaxFrame = 0x3FFFFFFF;
+constexpr uint32_t kProofRefusalHeader = 0xFFFFFFFE;
 
 class FrameError : public std::runtime_error {
 public:
@@ -47,12 +49,20 @@ inline std::string runtime_selection_failure(Status status) {
         "the OpenAbstractions runtime MSI registered for the current account";
 #elif defined(__linux__)
         "the loaded systemd user unit abstraction-runtime.service";
+#elif defined(__APPLE__)
+        "the per-user LaunchAgent com.openabstractions.runtime";
 #else
         "nothing: this platform has no installed-runtime selector";
 #endif
-    return "select installed runtime: " + reason + " (" + status_name(status) + "); looked for " + looked_for +
+    const char* alternative =
+#ifdef __APPLE__
+        ". Install and start the runtime, or construct the client with an explicit endpoint and server expectation";
+#else
         ". Install and start the runtime, or for a runtime you started yourself construct the client with its "
         "endpoint, e.g. ResolutionClient(runtime_endpoint()) to use ABSTRACTION_RUNTIME_ENDPOINT";
+#endif
+    return "select installed runtime: " + reason + " (" + status_name(status) + "); looked for " + looked_for +
+        alternative;
 }
 
 // Names the endpoint a connection could not reach and the next step.
@@ -120,26 +130,35 @@ public:
     }
     void write_frame(std::string_view frame) {
         check_size(frame.size());
-        if (sessions_) { session_call(frame, true); return; }
+        if (sessions_ || endpoint_.compare(0, 4, "xpc:") == 0) { session_call(frame, true); return; }
         Stream stream(endpoint_, operation_deadline(), cancellation_, server_);
         send(stream, frame);
         char byte;
         size_t moved = 0;
-        if (stream.read_some(&byte, 1, moved))
+        if (stream.read_some(&byte, 1, moved)) {
+            if (static_cast<unsigned char>(byte) == 0xFF) {
+                unsigned char tail[3];
+                read_exact(stream, tail, sizeof tail);
+                const uint32_t word = (uint32_t(0xFF) << 24) | (uint32_t(tail[0]) << 16) |
+                    (uint32_t(tail[1]) << 8) | tail[2];
+                if (word == kProofRefusalHeader) throw_proof_refusal(stream);
+            }
             throw FrameError("unexpected response to one-way frame");
+        }
         if (stream.status() != Status::Disconnected)
             throw FrameError("frame completion failed", stream.status());
     }
 
     std::string exchange_frame(std::string_view frame) {
         check_size(frame.size());
-        if (sessions_) return session_call(frame, false);
+        if (sessions_ || endpoint_.compare(0, 4, "xpc:") == 0) return session_call(frame, false);
         Stream stream(endpoint_, operation_deadline(), cancellation_, server_);
         send(stream, frame);
         unsigned char header[4];
         read_exact(stream, header, sizeof header);
         const uint32_t size = (uint32_t(header[0]) << 24) |
             (uint32_t(header[1]) << 16) | (uint32_t(header[2]) << 8) | header[3];
+        if (size == kProofRefusalHeader) throw_proof_refusal(stream);
         check_size(size); // reject before allocation
         std::string reply(size, '\0');
         read_exact(stream, reply.data(), reply.size());
@@ -154,8 +173,19 @@ private:
         return fixed_deadline_ ? deadline_ : now + std::chrono::milliseconds(timeout_);
     }
     void check_size(size_t size) const {
-        if (size > limit_ || size > UINT32_MAX)
+        if (size > limit_ || size > kWireMaxFrame)
             throw FrameError("frame too large", Status::InvalidArgument);
+    }
+    static void throw_proof_refusal(Stream& stream) {
+        unsigned char tokens[2];
+        read_exact(stream, tokens, sizeof tokens);
+        static const char* names[] = {"", "user", "process", "path", "package", "code"};
+        static const char* proofs[] = {"", "claimed", "invalid", "unsigned", "unmet", "pid", "bound", "kernel", "signed"};
+        if (tokens[0] > 5 || tokens[1] > 8 || (tokens[0] == 0) != (tokens[1] == 0))
+            throw FrameError("malformed caller-proof refusal");
+        if (tokens[0] == 0) throw FrameError("receiver refused caller proof", Status::ProofUnavailable);
+        throw FrameError(std::string("receiver refused caller proof: ") + names[tokens[0]] +
+            " requires " + proofs[tokens[1]], Status::ProofUnavailable);
     }
     void send(Stream& stream, std::string_view frame) const {
         const auto size = static_cast<uint32_t>(frame.size());
@@ -184,6 +214,8 @@ private:
     bool sessions_ = false;
 
     std::string session_call(std::string_view frame, bool one_way) const {
+        if (endpoint_.compare(0, 4, "xpc:") == 0 && !(oa_ipc_features() & OA_IPC_FEATURE_XPC))
+            throw FrameError("native XPC transport unavailable", Status::ProofUnavailable);
         const auto now = Clock::now();
         const auto deadline = operation_deadline();
         auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
@@ -200,6 +232,8 @@ private:
         std::unique_ptr<oa_ipc_reply, decltype(&oa_ipc_reply_release)> reply(raw, oa_ipc_reply_release);
         if (status != Status::Ok) {
             if (status == Status::InvalidArgument) throw FrameError("frame too large", status);
+            if (status == Status::ProofUnavailable)
+                throw FrameError("frame proof unavailable: receiver caller-proof refusal or local proof facility unavailable", status);
             if (sent == 0) throw FrameError(connect_failure(endpoint_, status), status);
             throw FrameError("frame exchange with " + endpoint_ + " failed (" + status_name(status) +
                 "); the request may have reached the runtime", status);

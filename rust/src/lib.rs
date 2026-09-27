@@ -46,6 +46,7 @@ extern "C" {
         out: *mut *mut c_void,
     ) -> i32;
     fn oa_ipc_version() -> u32;
+    fn oa_ipc_features() -> u32;
     fn oa_ipc_runtime_endpoint(buffer: *mut c_char, capacity: usize, required: *mut usize) -> i32;
     fn oa_ipc_cancellation_create(out: *mut *mut c_void) -> i32;
     fn oa_ipc_cancellation_signal(handle: *mut c_void);
@@ -400,6 +401,9 @@ impl FrameTransport {
     }
     fn session_call(&self, frame: &[u8], one_way: bool) -> Result<Vec<u8>, Error> {
         version()?;
+        if self.endpoint.starts_with("xpc:") && unsafe { oa_ipc_features() } & 1 == 0 {
+            return Err(error(PROOF_UNAVAILABLE, "native XPC transport unavailable"));
+        }
         if frame.len() > self.limit {
             return Err(error(INVALID_ARGUMENT, "outbound frame too large"));
         }
@@ -530,7 +534,7 @@ impl FrameTransport {
         Ok(connection)
     }
     pub fn exchange_frame(&self, frame: &[u8]) -> Result<Vec<u8>, Error> {
-        if self.sessions {
+        if self.sessions || self.endpoint.starts_with("xpc:") {
             return self.session_call(frame, false);
         }
         let mut connection = self.send(frame)?;
@@ -545,7 +549,7 @@ impl FrameTransport {
         Ok(reply)
     }
     pub fn write_frame(&self, frame: &[u8]) -> Result<(), Error> {
-        if self.sessions {
+        if self.sessions || self.endpoint.starts_with("xpc:") {
             return self.session_call(frame, true).map(|_| ());
         }
         let mut connection = self.send(frame)?;

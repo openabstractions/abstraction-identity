@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -117,6 +118,129 @@ func TestCodeVerdictIsReusedOnlyForTheSameInstanceAndPath(t *testing.T) {
 	fail = true
 	verify(started, exe, nil, 7)
 	verify(started, exe, nil, 8)
+}
+
+func TestBindingRetainsCachedVerdictDeadline(t *testing.T) {
+	count := countVerifications(t, func(windows.Handle, string, *Options) (Code, Proof, error) {
+		return Code{Status: "stub", Trusted: true}, ProofBound, nil
+	})
+	name := pipeName(t)
+	server := listen(t, name)
+	child := startChildClient(t, name, "age")
+	at := accept(t, server)
+	readFrom(t, server)
+	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(child.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(proc)
+	started, err := processStartTime(proc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := processImagePath(proc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifyProcessImage(proc, uint32(child.Process.Pid), started, path, nil); err != nil {
+		t.Fatal(err)
+	}
+	key := codeVerdictKey{pid: uint32(child.Process.Pid), started: started.UnixNano(), image: path}
+	codeVerdicts.Lock()
+	entry := codeVerdicts.entries[key]
+	if entry == nil {
+		codeVerdicts.Unlock()
+		t.Fatal("preloaded verdict was not retained")
+	}
+	entry.at = time.Now().Add(-codeVerdictLifetime + 30*time.Second)
+	wantDeadline := entry.at.Add(codeVerdictLifetime)
+	codeVerdicts.Unlock()
+	b, err := Bind(Handle(server), &Options{ConnectedAt: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if got := count.Load(); got != 1 {
+		t.Fatalf("%d verifications, want reuse of aged entry", got)
+	}
+	if got := b.EvidenceValidUntil(); !got.Equal(wantDeadline) {
+		t.Fatalf("binding evidence expires at %s, want original verdict deadline %s", got, wantDeadline)
+	}
+	if !b.BoundAt().Before(wantDeadline) || wantDeadline.After(b.BoundAt().Add(time.Minute)) {
+		t.Fatalf("test did not create an aged yet valid verdict: bound %s, expires %s", b.BoundAt(), wantDeadline)
+	}
+}
+
+func TestConcurrentCodeVerdictsShareOneVerification(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	count := countVerifications(t, func(windows.Handle, string, *Options) (Code, Proof, error) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+		return Code{Status: "stub", Trusted: true}, ProofBound, nil
+	})
+	proc, pid, started := selfInstance(t)
+	path := mustExe(t)
+	const callers = 8
+	start := make(chan struct{})
+	var ready, done sync.WaitGroup
+	ready.Add(callers)
+	done.Add(callers)
+	for range callers {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			if _, _, err := verifyProcessImage(proc, pid, started, path, nil); err != nil {
+				t.Errorf("verify: %v", err)
+			}
+		}()
+	}
+	ready.Wait()
+	close(start)
+	<-entered
+	// The first verifier remains blocked while every other caller can reach
+	// the same key. A second verifier means the expensive work was duplicated.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	done.Wait()
+	if got := count.Load(); got != 1 {
+		t.Fatalf("%d concurrent verifications for one process/path, want one", got)
+	}
+}
+
+func TestDifferentCodeVerdictKeysVerifyConcurrently(t *testing.T) {
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	countVerifications(t, func(_ windows.Handle, path string, _ *Options) (Code, Proof, error) {
+		entered <- path
+		<-release
+		return Code{Status: path}, ProofUnsigned, nil
+	})
+	proc, pid, started := selfInstance(t)
+	path := mustExe(t)
+	var done sync.WaitGroup
+	done.Add(2)
+	defer func() { close(release); done.Wait() }()
+	for _, image := range []string{path, path + ".other"} {
+		go func() {
+			defer done.Done()
+			if _, _, err := verifyProcessImage(proc, pid, started, image, nil); err != nil {
+				t.Errorf("verify: %v", err)
+			}
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("a different key could not verify while the first verifier was blocked")
+		}
+	}
 }
 
 // TestCodeVerdictsOfExitedProcessesAreReleased keeps a verdict for a child

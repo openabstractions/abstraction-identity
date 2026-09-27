@@ -11,6 +11,21 @@ static bool contains(const std::string& text, const std::string& part) { return 
 
 int main() {
     try {
+        const std::string xpc = "xpc:org.openabstractions.test.absent";
+        oa_ipc_connection* raw = nullptr;
+        require(oa_ipc_open(xpc.data(), xpc.size(), 100, &raw) == OA_IPC_INVALID_ARGUMENT && !raw,
+                "message endpoint accepted by raw stream API");
+        for (int exchange = 0; exchange < 2; ++exchange) {
+            FrameTransport transport(xpc, 1000);
+            try {
+                if (exchange) transport.exchange_frame("private"); else transport.write_frame("private");
+                require(false, "XPC frame accepted without runtime trust");
+            } catch (const FrameError& error) {
+                const auto expected = (oa_ipc_features() & OA_IPC_FEATURE_XPC)
+                    ? Status::Untrusted : Status::ProofUnavailable;
+                require(error.status == expected, "XPC lost transport support/trust refusal");
+            }
+        }
         const auto suffix = std::to_string(Clock::now().time_since_epoch().count());
 #ifdef _WIN32
         const std::string absent = "\\\\.\\pipe\\oa-absent-" + suffix;
@@ -37,7 +52,11 @@ int main() {
             const std::string what = error.what();
             require(error.status == Status::Timeout, "selection status: " + what);
             require(contains(what, "select installed runtime: timed out (timeout); looked for "), "selection wording: " + what);
+#ifdef __APPLE__
+            require(contains(what, "explicit endpoint and server expectation"), "selection next step missing: " + what);
+#else
             require(contains(what, "ABSTRACTION_RUNTIME_ENDPOINT"), "selection next step missing: " + what);
+#endif
         }
         const auto untrusted = runtime_selection_failure(Status::Untrusted);
         require(contains(untrusted, "no trusted runtime installation (untrusted)"), "untrusted wording: " + untrusted);
@@ -45,6 +64,8 @@ int main() {
         require(contains(untrusted, "MSI registered for the current account"), "Windows selection target: " + untrusted);
 #elif defined(__linux__)
         require(contains(untrusted, "abstraction-runtime.service"), "Linux selection target: " + untrusted);
+#elif defined(__APPLE__)
+        require(contains(untrusted, "LaunchAgent com.openabstractions.runtime"), "macOS selection target: " + untrusted);
 #endif
         require(contains(connect_failure("ep", Status::Untrusted), "not the expected runtime (untrusted)"), "untrusted connect wording");
         std::cout << "PASS frame error wording\n";

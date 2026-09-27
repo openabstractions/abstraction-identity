@@ -66,6 +66,9 @@ type Peer struct {
 	// particular answer: every place it came out weaker than this platform's
 	// best, and why. It is for humans, for logs and for tests.
 	Notes []string
+	// evidenceValidUntil bounds reuse of time-sensitive captured evidence.
+	// A zero value means no such expiry was recorded.
+	evidenceValidUntil time.Time
 }
 
 // User is a security principal. Which fields are populated depends on the
@@ -362,7 +365,12 @@ func (l Limits) String() string {
 // cannot produce should refuse to start rather than fail open once per
 // connection - or, worse, decide it can relax the requirement.
 func CanEver(n Need) error {
-	l := Ceiling()
+	return Ceiling().CanEver(n)
+}
+
+// CanEver compares a policy with this transport's limits. All transports use
+// this comparison; their providers supply the evidence ceilings.
+func (l Limits) CanEver(n Need) error {
 	var errs []error
 	cmp := func(name string, want, have Proof) {
 		if want > have {

@@ -1,15 +1,32 @@
 import {createRequire} from 'node:module';
 import {isAbsolute} from 'node:path';
+import {addonFile, platformFile, platformIdentity, platformLibrary, platformPackage} from './platform.js';
 const require = createRequire(import.meta.url);
 export const Status = Object.freeze({Ok:0, Timeout:1, Disconnected:2, IoError:3,
   InvalidArgument:4, NoMemory:5, InternalError:6, Cancelled:7, Untrusted:8, ProofUnavailable:9});
+/** The development addon a source build installs beside this file. */
+const developmentAddon = './native/oa_ipc_node.node';
+/**
+ * The addon this connector loads, resolved before any native load:
+ * `ABSTRACTION_IPC_NODE` as a development override, then this platform's package,
+ * then the development addon of a source build. A platform with no published
+ * package is refused by name.
+ */
+export function addonPath() {
+  const explicit = process.env.ABSTRACTION_IPC_NODE;
+  if (explicit) {
+    if (!isAbsolute(explicit)) throw new TypeError('ABSTRACTION_IPC_NODE must be absolute');
+    return explicit;
+  }
+  const identity = platformIdentity();
+  if (platformLibrary(identity) === null)
+    throw new FrameError(Status.ProofUnavailable,
+      `@openabstractions/ipc publishes no native client for ${identity}`);
+  return platformFile((specifier) => require.resolve(specifier), identity, addonFile) ?? developmentAddon;
+}
 let installed;
 function native() {
-  if (!installed) {
-    const path = process.env.ABSTRACTION_IPC_NODE;
-    if (path && !isAbsolute(path)) throw new TypeError('ABSTRACTION_IPC_NODE must be absolute');
-    installed = require(path || './native/oa_ipc_node.node');
-  }
+  if (!installed) installed = require(addonPath());
   return installed;
 }
 export class FrameError extends Error {

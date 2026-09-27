@@ -1,5 +1,11 @@
 # Rust binding to shared IPC
 
+This page is for whoever builds or embeds an OA client transport in Rust, or a
+generated Rust capability client on top of it. An application calling a
+capability resolves a typed client through the facade instead.
+
+Install the runtime first: https://openabstractions.org/adopt.html
+
 This crate depends on the pure `abstraction-frame` contract and wraps the existing native client C ABI. It supplies
 native bootstrap, bounded framed bytes, deadlines and cancellation. Generated
 Rust capability clients use this transport through the shared framing trait.

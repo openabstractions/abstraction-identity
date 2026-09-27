@@ -22,7 +22,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PLATFORMS = {"windows": "Windows", "linux": "Linux", "macos": "Darwin"}
-KINDS = ("system", "cxx-runtime")
+KINDS = ("system", "cxx-runtime", "framework")
 NAME = re.compile(r"^[A-Za-z0-9_+.\-]+$")
 
 
@@ -39,6 +39,8 @@ def parse(text, origin):
         fields = line.split()
         if len(fields) != 3 or fields[0] not in PLATFORMS or fields[1] not in KINDS or not NAME.match(fields[2]):
             raise Divergence(f"{origin}:{number}: expected '<platform> <kind> <library>': {raw}")
+        if fields[1] == "framework" and fields[0] != "macos":
+            raise Divergence(f"{origin}:{number}: frameworks require macos")
         entries.append(tuple(fields))
     if len(set(entries)) != len(entries):
         raise Divergence(f"{origin}: duplicate entry")
@@ -71,7 +73,7 @@ def check_sources(entries, cmake_text, build_rs_text):
     if "link-dependencies.txt" not in rust:
         raise Divergence("build.rs does not read the installed link-dependencies.txt")
     for literal in re.findall(r'rustc-link-lib=([^"{}\s]+)', rust):
-        if literal != "static=abstraction_ipc":
+        if literal not in ("static=abstraction_ipc", "framework="):
             raise Divergence(f"build.rs hardcodes link library {literal}")
     for name in names:
         if re.search(r'"' + re.escape(name) + r'"', rust):
@@ -92,7 +94,8 @@ def check_prefix(entries, source_text, prefix):
     match = re.search(r'INTERFACE_LINK_LIBRARIES\s+"((?:[^"\\]|\\.)*)"', targets[0].read_text(encoding="utf-8"))
     value = (match.group(1) if match else "").replace("\\$", "$")
     exported = set(re.findall(r"\$<\$<PLATFORM_ID:([A-Za-z]+)>:([^>]+)>", value))
-    expected = {(PLATFORMS[p], name) for p, kind, name in entries if kind == "system"}
+    expected = {(PLATFORMS[p], "-framework " + name if kind == "framework" else name)
+                for p, kind, name in entries if kind in ("system", "framework")}
     if exported != expected:
         raise Divergence(f"exported CMake platform libraries {sorted(exported)} differ from list {sorted(expected)}")
 
@@ -102,7 +105,9 @@ def check_cargo(entries, log_text):
     if not emitted:
         raise Divergence("cargo output has no abstraction-ipc build script link lines; build with -vv")
     platform = host_platform()
-    expected = {"static=abstraction_ipc"} | {name for p, _, name in entries if p == platform}
+    expected = {"static=abstraction_ipc"} | {
+        "framework=" + name if kind == "framework" else name
+        for p, kind, name in entries if p == platform}
     if emitted != expected:
         raise Divergence(f"cargo emitted {sorted(emitted)}; list requires {sorted(expected)}")
 
@@ -125,6 +130,7 @@ def self_test(source, cmake, build_rs):
         "build.rs ignores the list": ("build.rs", lambda t: t.replace("link-dependencies.txt", "other.txt")),
         "CMake hardcodes a library": ("CMakeLists.txt", lambda t: t.replace("install(DIRECTORY", "target_link_libraries(abstraction_ipc PUBLIC $<$<PLATFORM_ID:Windows>:msi>)\ninstall(DIRECTORY")),
         "malformed list": ("link-dependencies.txt", lambda t: t + "windows shared advapi32\n"),
+        "framework on wrong platform": ("link-dependencies.txt", lambda t: t + "linux framework CoreFoundation\n"),
     }
     with tempfile.TemporaryDirectory(prefix="oa-link-check-") as tmp:
         for label, (file, mutate) in cases.items():
@@ -148,7 +154,7 @@ def self_test(source, cmake, build_rs):
         log = Path(tmp) / "cargo.log"
         entries = parse(source.read_text(encoding="utf-8"), source.name)
         platform = host_platform()
-        good = "".join(f"[abstraction-ipc 0.0.0] cargo:rustc-link-lib={n}\n" for n in ["static=abstraction_ipc"] + [name for p, _, name in entries if p == platform])
+        good = "".join(f"[abstraction-ipc 0.0.0] cargo:rustc-link-lib={n}\n" for n in ["static=abstraction_ipc"] + ["framework=" + name if kind == "framework" else name for p, kind, name in entries if p == platform])
         log.write_text(good, encoding="utf-8")
         check_cargo(entries, log.read_text(encoding="utf-8"))
         missing = good.splitlines()[:-1] if len(good.splitlines()) > 1 else []

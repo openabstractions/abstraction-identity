@@ -123,6 +123,18 @@ func errnoOrEINVAL(e syscall.Errno) error {
 	return syscall.EINVAL
 }
 
+func init() {
+	// A short DOS 8.3 name component and its long-form spelling name the
+	// same file. This concept exists only on Windows; this is the one
+	// platform where canonicalProgramPath does more than return its argument.
+	canonicalProgramPath = func(path string) string {
+		if long, err := longImagePath(path); err == nil {
+			return long
+		}
+		return path
+	}
+}
+
 var procGetPackagePathByFullName = modkernel32.NewProc("GetPackagePathByFullName")
 
 // packagePathByFullName returns the folder an installed MSIX package's files
@@ -133,6 +145,7 @@ func packagePathByFullName(fullName string) (string, error) {
 		return "", err
 	}
 	var n uint32
+	//unchecked: SyscallN's error is the raw GetLastError, not meaningful without a failed primary return, which is checked below
 	r1, _, _ := syscall.SyscallN(procGetPackagePathByFullName.Addr(), uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(&n)), 0)
 	if syscall.Errno(r1) != syscall.ERROR_INSUFFICIENT_BUFFER || n == 0 {
 		if r1 == 0 {
@@ -141,6 +154,7 @@ func packagePathByFullName(fullName string) (string, error) {
 		return "", syscall.Errno(r1)
 	}
 	buf := make([]uint16, n)
+	//unchecked: SyscallN's error is the raw GetLastError, not meaningful without a failed primary return, which is checked below
 	r1, _, _ = syscall.SyscallN(procGetPackagePathByFullName.Addr(), uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(&n)), uintptr(unsafe.Pointer(&buf[0])))
 	if r1 != 0 {
 		return "", syscall.Errno(r1)

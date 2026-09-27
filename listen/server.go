@@ -59,7 +59,16 @@ func (e ServerExpectation) check(b *identity.Binding) error {
 	}
 	match := filepath.Clean(path) == filepath.Clean(e.Program)
 	if runtime.GOOS == "windows" {
-		match = strings.EqualFold(filepath.Clean(path), filepath.Clean(e.Program))
+		// The peer's image path is whatever spelling the kernel recorded when
+		// the process was created: a short DOS 8.3 alias when it was launched
+		// that way. The expectation is ordinarily typed or resolved as a long
+		// path. Canonicalizing both to the OS's own long spelling before
+		// folding case makes either spelling of the same file match, and
+		// keeps a different file from matching.
+		match = strings.EqualFold(
+			identity.CanonicalProgramPath(filepath.Clean(path)),
+			identity.CanonicalProgramPath(filepath.Clean(e.Program)),
+		)
 	}
 	if !match {
 		return errors.New("server program mismatch")
@@ -136,6 +145,7 @@ func (c *serverConn) use(ctx context.Context) (func() bool, error) {
 	if err := c.Conn.SetDeadline(deadline); err != nil {
 		return nil, err
 	}
+	//unchecked: best-effort teardown triggered by context cancellation, no caller left to report a close failure to
 	return context.AfterFunc(ctx, func() { c.Close() }), nil
 }
 

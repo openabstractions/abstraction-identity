@@ -1,5 +1,14 @@
 # abstraction-identity
 
+## For application developers
+
+An application does not call this layer. OA's capability services — asks,
+rights, credentials, logging and the rest — call it at their own receiving
+boundary, to verify who connected before reading a request. The platform
+table under [Today](#today) shows the proof available on each transport.
+Current source provides Program proof over macOS XPC; the macOS Unix-socket
+and loopback paths still refuse calls requiring that proof.
+
 Let a local service verify which account and executable connected before it
 reads a protected request. Each fact records how strongly the operating system
 proved it. A service that needs executable-level proof receives no identity when
@@ -10,9 +19,11 @@ capability request. Applications normally consume the resulting authorization
 and attribution through capability clients. Service and transport authors use
 `Peer`, `Proof`, `CanEver` and the native listener directly.
 
-**In development.** Windows and Linux provide the Program proof used by current
-protected service tests. The macOS Unix peer path cannot bind an executable to
-the connection and protected calls fail closed. No tagged release exists yet.
+**In development.** Windows named pipes, Linux Unix sockets and macOS XPC provide
+the Program evidence used by current protected service tests. The macOS Unix
+socket path remains below that policy and fails closed. The XPC implementation
+described here is current source behavior; the published 0.2.0 package predates
+it.
 
 ## The problem
 
@@ -22,10 +33,9 @@ tell that the caller really is LogViewer. If it cannot, every grant is theatre:
 any process on the machine claims to be LogViewer and the permission model is a
 list of names nobody checks.
 
-This is not hypothetical. A shipped Windows tool exposes a "hold the machine
-awake on my behalf" API over a named pipe that any interactive user can write
-to, takes an `owner` string in the message, and never verifies it. Two callers
-can hold the same lock under the same name; either can release the other's.
+A shipped Windows tool's own "hold the machine awake on my behalf" API takes
+an unverified `owner` string over an open named pipe: two callers hold the
+same lock under one name, and either releases the other's.
 
 The operating system already knows the answer. On Windows,
 `ImpersonateNamedPipeClient` plus `OpenThreadToken` hands the service the
@@ -40,21 +50,28 @@ something weaker.
 | word | meaning |
 |---|---|
 | **peer** | the program on the other end: five attributes, each with a proof |
-| **proof** | how hard the value would be to fake, weakest first: `none`, `claimed`, `invalid`, `unsigned`, `unmet`, `pid`, `bound`, `kernel`, `signed`. This is an assurance level in the sense of [NIST SP 800-63](https://pages.nist.gov/800-63-3/sp800-63-3.html), and **diverges** from one: three rungs are verdicts on a check that failed rather than claims about strength; [CONTRACT.md](CONTRACT.md) says why they sit where they do |
+| **proof** | how hard the value would be to fake, weakest first: `none`, `claimed`, `invalid`, `unsigned`, `unmet`, `pid`, `bound`, `kernel`, `signed`. This is an assurance level in the sense of [NIST SP 800-63](https://pages.nist.gov/800-63-3/sp800-63-3.html), and **diverges** from one: three proof levels are verdicts on a check that failed rather than claims about strength; [CONTRACT.md](CONTRACT.md) says why they sit where they do |
 | **claimed** | *the peer said so*; this package never produces it and has no API that accepts it |
 | **bound** | read through something that ties the value to the process that connected, so no successor can take its place |
 | **ceiling** | the best each attribute can reach on the running platform, known before any connection exists |
-| **binding** | the answer taken once at accept and refused afterwards rather than re-derived |
+| **bind** | take the answer once at accept and refuse it afterwards rather than re-deriving it |
 
 No rule on this page carries a tag; the contract is
 [CONTRACT.md](CONTRACT.md), and the attack tests named there are what hold an
 implementation to it.
 
+Identity's proof level `claimed` differs from logging's attestation standing
+`claimed`; see
+[abstraction-logging](https://github.com/openabstractions/abstraction-logging)'s
+[CONTRACT.md](https://github.com/openabstractions/abstraction-logging/blob/main/CONTRACT.md).
+
 ## Obtain
 
+Install the runtime first: https://openabstractions.org/adopt.html
+
 - **Go.** `go get github.com/openabstractions/abstraction-identity`. The module
-  is at the repository root. One dependency, `golang.org/x/sys`. No tag yet;
-  `go get` resolves a pseudo-version of `main`.
+  is at the repository root. One dependency, `golang.org/x/sys`. Releases use
+  root-level `vX.Y.Z` tags; pin a release by adding `@vX.Y.Z` to the module path.
 - **Other languages.** See generated protocol and shared transport/client packages
   in this repository and the facade. Native provider support is separate.
 
@@ -160,14 +177,13 @@ if err := b.Check(policy); err != nil { reject(c); return }       // ErrPeerMove
 Linux kernel below 6.5 — rather than degrading to a lookup. `Ceiling().Bindable`
 says so before a connection exists, so a service can refuse to start.
 
-A peer that merely exits does not invalidate a binding: "the process that opened
-this connection was X" stays true after X is gone, and every primitive here pins
-the process so no successor can take its place. `Binding.Alive` is the separate
-question.
+A peer that merely exits stays bound: "the process that opened this connection
+was X" stays true after X is gone, and every primitive here pins the process
+so no successor can take its place. `Binding.Alive` is the separate question.
 
 ## Today
 
-**Native Go provider profile.** `listen/` is the local listener the services above it share.
+**Native stream profile.** `listen/` is the local listener the services above it share.
 
 | | Windows (npipe) | macOS (unix) | Linux (unix) |
 | --- | --- | --- | --- |
@@ -186,8 +202,17 @@ resolved by XNU from the peer socket's *most recent writer*, not stamped at
 connect. `Options.ConnectedAt` was believed to close that and does not:
 `p_starttime` survives `execve`, so a helper forked before the connection and
 exec'ing `/bin/cat` after it passes every check and is handed Apple's signature.
-Measured twice on 15.7.4; see `bind_attack_darwin_test.go`. XPC is where macOS
-reaches `signed`, and this package speaks sockets.
+Measured twice on 15.7.4; see `bind_attack_darwin_test.go`.
+
+Current source also provides launchd-registered `xpc:service-name` endpoints.
+Each request is bound to the exact XPC message before its frame reaches a
+handler. The measured implementation supplies `kernel` user and process evidence
+and a `bound` executable path, satisfying `listen.Program`. It validates the
+message sender's code structurally, while `Package` and `Code` remain unknown
+because ad-hoc validity establishes no trusted publisher. Client bootstrap
+checks an independently selected runtime executable and user before sending a
+capability frame. The client APIs used here require macOS 12 or newer; execution
+evidence is from macOS 26.6.2 arm64.
 
 Linux is the mirror image: unforgeable answers about *who* — uid, gid, and the
 LSM profile from `SO_PEERSEC` — and no general answer at all about *what*.
@@ -202,15 +227,16 @@ clicking it. The same holds on Linux, where a same-uid process can `ptrace` its
 neighbour, rewrite its binary, and fabricate both of the sandbox identities this
 package can report. macOS is the one platform where the program is a meaningful
 unit — `task_for_pid` is refused against hardened binaries — and it is also the
-one where the *binding* between that program and the connection is weakest over
-a socket. Neither trade is obvious from the API, which is why
+one where binding that program to the connection is weakest over a socket.
+Neither trade is obvious from the API, which is why
 [CONTRACT.md](CONTRACT.md) is long: what Windows will not tell you, and what a
 permission system built on this must therefore refuse to promise.
 
 ## Conformance
 
 All three platforms are covered by tests in this repository, run on Windows 11,
-Linux 6.18 and 4.4, and macOS 15.7.4 arm64 with and without cgo.
+Linux 6.18 and 4.4, macOS 15.7.4 arm64 for the Unix path, and macOS 26.6.2 arm64
+for the XPC path.
 [CONTRACT.md](CONTRACT.md) has the full "what was tested where" table, and the
 reasoning for every cell above. The `bind_attack_*_test.go` files run this
 platform's own impersonation attack against `Bind`, and `go run ./cmd/peerid`
@@ -220,31 +246,11 @@ connection, no simulation.
 
 ### Why macOS is the one that needs a Mac
 
-Windows and Linux are proved by cross-compiling and then running: `go vet` for
-the target catches what build tags hide, and a Linux kernel is available to
-execute against. macOS is different for one reason. `codesign_darwin.go` calls
-the Security framework through cgo, and **cross-compiling turns cgo off** — so
-every darwin build a non-Mac can perform selects `codesign_nocgo_darwin.go`
-instead, and the file that verifies a running program's signature is in no build
-at all. It is not weakly checked here; it is unread.
-
-What can be checked without a Mac, and is, by
-`TestDarwinCgoBuildTypeChecks`: the file parses, and the darwin-plus-cgo build
-of the package type-checks with a stub standing in for the pseudo-package `C`.
-That catches a renamed constant, a struct field that no longer exists, a method
-gone from `*Options`, a return type or parameter list drifting from what
-`identity_darwin.go` calls, and a syntax error — each demonstrated by
-reintroducing it. What it cannot catch is anything whose type comes from `C`:
-`go/types` marks those expressions invalid and stops, so a return statement
-built out of `C.GoString` calls can lose a value and the check stays green.
-
-What a real check needs, in full: a macOS host with the Xcode command line
-tools, and `CGO_ENABLED=1 go test ./...` in this directory — about a minute
-cold. None of it can move off a Mac: the SDK headers, the framework binaries and
-a signed running process to ask about are all macOS. Without a macOS runner it
-stays a deliberate measurement rather than a continuous one, so our own checks
-report darwin as `UNPROVEN` by name instead of passing it, and a Mac run is
-dated and recorded when it happens.
+Cross-compiling turns off the cgo that reads a running program's signature, so
+darwin's own checks type-check the file without ever executing it and report
+`UNPROVEN` by name until a Mac runs it; the full account is in
+`research/identity/MACOS-BUILD.md`, a private research note held in this
+project's own tree.
 
 ## Where it sits
 
@@ -263,6 +269,15 @@ hold an implementation to it.
 ## Requirements
 
 Go 1.25 or newer and `golang.org/x/sys`. Windows, Linux, macOS.
+
+## Design records
+
+Private research notes held in this project's own tree, behind the claims
+made above.
+
+- `research/macos-xpc-clients.md`
+- `research/macos-xpc-exec-proof.md`
+- `research/adoption/opencode-bun-binding/RESULTS.md`
 
 ## Licence
 

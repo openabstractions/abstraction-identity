@@ -8,6 +8,8 @@ import (
 	"syscall"
 )
 
+func writeSignalsClosedPeerPlatform(error) bool { return false }
+
 func dialFramed(ctx context.Context, path string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, "unix", path)
 }

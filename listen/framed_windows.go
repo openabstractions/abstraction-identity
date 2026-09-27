@@ -14,6 +14,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func writeSignalsClosedPeerPlatform(err error) bool {
+	return errors.Is(err, windows.ERROR_BROKEN_PIPE) ||
+		errors.Is(err, windows.ERROR_NO_DATA) ||
+		errors.Is(err, windows.ERROR_PIPE_NOT_CONNECTED)
+}
+
 func dialFramed(ctx context.Context, name string) (net.Conn, error) {
 	if !strings.HasPrefix(name, `\\.\pipe\`) || len(name) <= len(`\\.\pipe\`) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: errors.New("expected local named pipe")}
@@ -73,6 +79,7 @@ func idleIntact(c net.Conn) bool {
 	intact := false
 	err = raw.Control(func(fd uintptr) {
 		var available uint32
+		//unchecked: Call's error is the raw GetLastError, not meaningful without a failed primary return, which is checked below
 		r, _, _ := peekNamedPipe.Call(fd, 0, 0, 0, uintptr(unsafe.Pointer(&available)), 0)
 		intact = r != 0 && available == 0
 	})

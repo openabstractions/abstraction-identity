@@ -5,15 +5,26 @@
 #include "local_stream.h"
 #include "server_guard.h"
 #include "runtime_selection.h"
+#include "session_test_hooks.h"
 #include <new>
 #include <algorithm>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
+#ifdef __APPLE__
+#include "../../xpc_native.h"
+#endif
 struct oa_ipc_cancellation {
     std::shared_ptr<abstraction::local_stream::Cancellation> state =
         std::make_shared<abstraction::local_stream::Cancellation>();
+#ifdef __APPLE__
+    oa_xpc_cancel* xpc = nullptr;
+    oa_ipc_cancellation() {
+        if (oa_xpc_cancel_create(&xpc) != OA_XPC_OK) throw std::bad_alloc();
+    }
+    ~oa_ipc_cancellation() { oa_xpc_cancel_free(xpc); }
+#endif
 };
 struct oa_ipc_runtime_selection {
     abstraction::ipc_internal::RuntimeIdentity identity;
@@ -67,6 +78,12 @@ const oa_ipc_server_expectation* oa_ipc_selected_server(const oa_ipc_runtime_sel
 }
 void oa_ipc_runtime_selection_release(oa_ipc_runtime_selection* selected) { delete selected; }
 uint32_t oa_ipc_version(void) { return 1; }
+uint32_t oa_ipc_features(void) {
+#ifdef __APPLE__
+    if (oa_xpc_available()) return OA_IPC_FEATURE_XPC;
+#endif
+    return 0;
+}
 oa_ipc_status oa_ipc_runtime_endpoint(char* buffer, size_t capacity, size_t* required) {
     if (!required) return OA_IPC_INVALID_ARGUMENT;
     *required = 0;
@@ -89,7 +106,13 @@ oa_ipc_status oa_ipc_cancellation_create(oa_ipc_cancellation** out) {
     catch(const std::bad_alloc&){return OA_IPC_NO_MEMORY;}
     catch(...){return OA_IPC_INTERNAL_ERROR;}
 }
-void oa_ipc_cancellation_signal(oa_ipc_cancellation* c) {if(c)c->state->signal();}
+void oa_ipc_cancellation_signal(oa_ipc_cancellation* c) {
+    if (!c) return;
+    c->state->signal();
+#ifdef __APPLE__
+    oa_xpc_cancel_fire(c->xpc);
+#endif
+}
 void oa_ipc_cancellation_release(oa_ipc_cancellation* c) {try{delete c;}catch(...){}}
 
 oa_ipc_status oa_ipc_open(const char* endpoint, size_t length, uint32_t timeout_ms, oa_ipc_connection** out) {
@@ -104,6 +127,7 @@ oa_ipc_status oa_ipc_open_cancelable(const char* endpoint,size_t length,uint32_t
     try {
         std::string path(endpoint, length);
         if (path.find('\0') != std::string::npos) return OA_IPC_INVALID_ARGUMENT;
+        if (path.compare(0, 4, "xpc:") == 0) return OA_IPC_INVALID_ARGUMENT;
         auto state=cancellation ? cancellation->state : std::shared_ptr<abstraction::local_stream::Cancellation>{};
         auto* c = new oa_ipc_connection(path, deadline, std::move(state));
         const auto result = status(c);
@@ -122,6 +146,7 @@ oa_ipc_status oa_ipc_open_verified(const char* endpoint, size_t length, uint32_t
     try {
         std::string path(endpoint, length);
         if (path.find('\0') != std::string::npos) return OA_IPC_INVALID_ARGUMENT;
+        if (path.compare(0, 4, "xpc:") == 0) return OA_IPC_INVALID_ARGUMENT;
         auto guard = std::make_unique<abstraction::ipc_internal::ServerGuard>(*expectation);
         auto state = cancellation ? cancellation->state : std::shared_ptr<abstraction::local_stream::Cancellation>{};
         auto c = std::make_unique<oa_ipc_connection>(path, deadline, std::move(state));
@@ -167,11 +192,17 @@ void oa_ipc_close(oa_ipc_connection* c) { try { delete c; } catch (...) {} }
 // The client half of listen/FRAMING.md "Sessions", shared by every language
 // that loads this library. Constants and rules match the Go listen package.
 struct oa_ipc_reply { std::vector<unsigned char> bytes; };
+#ifdef ABSTRACTION_IPC_TEST_HOOKS
+namespace abstraction { namespace ipc_internal {
+SessionWriteHook session_test_write = nullptr;
+SessionOpenHook session_test_open = nullptr;
+}}
+#endif
 namespace {
 using SessionClock = abstraction::local_stream::Clock;
 constexpr uint32_t kSessionFlag = 0x80000000u, kOneWayFlag = 0x40000000u, kLengthMask = 0x3FFFFFFFu;
 constexpr uint32_t kSessionClosing = 0xFFFFFFFFu, kSessionAccept = kSessionFlag, kSessionDecline = 0,
-    kSessionUnsupported = kOneWayFlag;
+    kSessionUnsupported = kOneWayFlag, kProofRefusal = 0xFFFFFFFEu;
 constexpr auto kPoolIdle = std::chrono::seconds(10);
 constexpr size_t kPoolPerEndpoint = 4;
 constexpr auto kSingleMemory = std::chrono::seconds(30);
@@ -255,6 +286,10 @@ uint32_t get_u32(const unsigned char* in) {
     return (uint32_t(in[0]) << 24) | (uint32_t(in[1]) << 16) | (uint32_t(in[2]) << 8) | in[3];
 }
 oa_ipc_status write_all(oa_ipc_connection* c, const unsigned char* bytes, size_t length, size_t* moved) {
+#ifdef ABSTRACTION_IPC_TEST_HOOKS
+    if (abstraction::ipc_internal::session_test_write)
+        return abstraction::ipc_internal::session_test_write(c, bytes, length, moved);
+#endif
     return oa_ipc_write(c, bytes, length, moved);
 }
 oa_ipc_status read_exact(oa_ipc_connection* c, unsigned char* out, size_t length, size_t* got) {
@@ -268,6 +303,52 @@ oa_ipc_status read_exact(oa_ipc_connection* c, unsigned char* out, size_t length
     }
     return OA_IPC_OK;
 }
+oa_ipc_status read_proof_refusal(oa_ipc_connection* c) {
+    unsigned char tokens[2];
+    size_t got = 0;
+    const auto status = read_exact(c, tokens, sizeof tokens, &got);
+    if (status != OA_IPC_OK) return status;
+    if (tokens[0] > 5 || tokens[1] > 8 || (tokens[0] == 0) != (tokens[1] == 0))
+        return OA_IPC_IO_ERROR;
+    return OA_IPC_PROOF_UNAVAILABLE;
+}
+// A receiver may refuse immediately after its request header and close before
+// the client finishes writing the body. The caller exclusively owns c (including
+// a connection removed from the pool). Inspect only the six-byte terminal
+// control; every incomplete or different response preserves the write error.
+oa_ipc_status refusal_after_write_error(oa_ipc_connection* c, oa_ipc_status write_error,
+                                        bool opening_header = false) {
+    if (write_error != OA_IPC_DISCONNECTED && write_error != OA_IPC_IO_ERROR) return write_error;
+    unsigned char control[10]{};
+    size_t expected = opening_header ? 4 : 6;
+    bool accepted = false;
+    for (size_t used = 0; used < expected;) {
+        if (c->server && !c->server->check()) return write_error;
+        size_t moved = 0;
+        if (!c->stream.read_after_failed_write(control + used, expected - used, moved)) return write_error;
+        if (c->server && !c->server->check()) return write_error;
+        if (moved == 0 || moved > expected - used) return write_error;
+        used += moved;
+        if (opening_header && used >= 4 && expected == 4 &&
+            (get_u32(control) == kSessionAccept || get_u32(control) == kSessionDecline ||
+             get_u32(control) == kSessionUnsupported)) {
+            accepted = true;
+            expected = 10;
+            continue;
+        }
+        const size_t offset = accepted ? 4 : 0;
+        if (opening_header && !accepted && used < 4) continue;
+        for (size_t i = offset; i < used && i < offset + 3; ++i)
+            if (control[i] != 0xFF) return write_error;
+        if (used >= offset + 4 && control[offset + 3] != 0xFE) return write_error;
+        if (opening_header && !accepted && used == 4 && get_u32(control) == kProofRefusal)
+            expected = 6;
+    }
+    const unsigned char* marker = control + (accepted ? 4 : 0);
+    if (get_u32(marker) != kProofRefusal || marker[4] > 5 || marker[5] > 8 ||
+        (marker[4] == 0) != (marker[5] == 0)) return write_error;
+    return OA_IPC_PROOF_UNAVAILABLE;
+}
 struct Owned {
     oa_ipc_connection* c = nullptr;
     ~Owned() { oa_ipc_close(c); }
@@ -275,6 +356,10 @@ struct Owned {
 };
 oa_ipc_status open_for(const std::string& endpoint, SessionClock::time_point deadline, oa_ipc_cancellation* cancellation,
     const oa_ipc_server_expectation* expectation, oa_ipc_connection** out) {
+#ifdef ABSTRACTION_IPC_TEST_HOOKS
+    if (abstraction::ipc_internal::session_test_open)
+        return abstraction::ipc_internal::session_test_open(endpoint, deadline, cancellation, expectation, out);
+#endif
     const auto ms = remaining_ms(deadline);
     return expectation
         ? oa_ipc_open_verified(endpoint.data(), endpoint.size(), ms, cancellation, expectation, out)
@@ -287,6 +372,14 @@ oa_ipc_status finish_single(oa_ipc_connection* c, uint32_t max_reply, bool one_w
         unsigned char byte;
         size_t n = 0;
         const auto status = oa_ipc_read(c, &byte, 1, &n);
+        if (status == OA_IPC_OK && n == 1 && byte == 0xFF) {
+            unsigned char rest[3];
+            size_t got = 0;
+            const auto tail = read_exact(c, rest, sizeof rest, &got);
+            if (tail != OA_IPC_OK) return tail;
+            const unsigned char header[4] = {byte, rest[0], rest[1], rest[2]};
+            if (get_u32(header) == kProofRefusal) return read_proof_refusal(c);
+        }
         return status == OA_IPC_DISCONNECTED ? OA_IPC_OK : status == OA_IPC_OK ? OA_IPC_IO_ERROR : status;
     }
     unsigned char header[4];
@@ -294,7 +387,8 @@ oa_ipc_status finish_single(oa_ipc_connection* c, uint32_t max_reply, bool one_w
     auto status = read_exact(c, header, 4, &got);
     if (status != OA_IPC_OK) return status;
     const uint32_t length = get_u32(header);
-    if (length > max_reply) return OA_IPC_INVALID_ARGUMENT;
+    if (length == kProofRefusal) return read_proof_refusal(c);
+    if (length > max_reply || length > kLengthMask) return OA_IPC_INVALID_ARGUMENT;
     auto out = std::make_unique<oa_ipc_reply>();
     out->bytes.resize(length);
     if (length && (status = read_exact(c, out->bytes.data(), length, &got)) != OA_IPC_OK) return status;
@@ -313,9 +407,69 @@ oa_ipc_status single_call(const std::string& endpoint, SessionClock::time_point 
     size_t moved = 0;
     status = write_all(c.c, request.data(), request.size(), &moved);
     *sent = moved > 4 ? moved - 4 : 0;
-    if (status != OA_IPC_OK) return status;
+    if (status != OA_IPC_OK) return refusal_after_write_error(c.c, status);
     return finish_single(c.c, max_reply, one_way, reply);
 }
+
+#ifdef __APPLE__
+oa_ipc_status xpc_status(oa_xpc_status value) {
+    switch (value) {
+    case OA_XPC_OK: return OA_IPC_OK;
+    case OA_XPC_CLOSED: return OA_IPC_DISCONNECTED;
+    case OA_XPC_TIMEOUT: return OA_IPC_TIMEOUT;
+    case OA_XPC_CANCELLED: return OA_IPC_CANCELLED;
+    case OA_XPC_INVALID_ARGUMENT: return OA_IPC_INVALID_ARGUMENT;
+    case OA_XPC_UNTRUSTED: return OA_IPC_UNTRUSTED;
+    case OA_XPC_UNAVAILABLE: return OA_IPC_PROOF_UNAVAILABLE;
+    case OA_XPC_CALLER_PROOF_UNMET: return OA_IPC_PROOF_UNAVAILABLE;
+    default: return OA_IPC_IO_ERROR;
+    }
+}
+
+oa_ipc_status xpc_call(const std::string& endpoint, SessionClock::time_point deadline,
+    oa_ipc_cancellation* cancellation, const oa_ipc_server_expectation* expectation,
+    const void* frame, size_t length, uint32_t max_reply, bool one_way,
+    oa_ipc_reply** reply, size_t* sent) {
+    // The shared core authenticates the runtime before sending any frame.
+    if (!expectation) return OA_IPC_UNTRUSTED;
+    if (endpoint.size() == 4) return OA_IPC_INVALID_ARGUMENT;
+    uint32_t uid = 0;
+    for (size_t i = 0; i < expectation->principal_length; ++i) {
+        const unsigned char ch = expectation->principal[i];
+        if (ch < '0' || ch > '9' || uid > (UINT32_MAX - (ch - '0')) / 10)
+            return OA_IPC_INVALID_ARGUMENT;
+        uid = uid * 10 + (ch - '0');
+    }
+    if (cancellation && cancellation->state->requested()) return OA_IPC_CANCELLED;
+    const auto ms = remaining_ms(deadline);
+    if (!ms) return OA_IPC_TIMEOUT;
+    const uint64_t native_deadline = oa_xpc_now_ns() + uint64_t(ms) * 1000000;
+    const std::string program(expectation->program, expectation->program_length);
+    oa_xpc_client* raw = nullptr;
+    auto result = oa_xpc_client_open(endpoint.c_str() + 4, program.c_str(), uid,
+        max_reply, native_deadline, cancellation ? cancellation->xpc : nullptr, &raw);
+    std::unique_ptr<oa_xpc_client, decltype(&oa_xpc_client_free)> client(raw, oa_xpc_client_free);
+    if (result != OA_XPC_OK) return xpc_status(result);
+    void* bytes = nullptr;
+    size_t size = 0;
+    uint8_t proof_attribute = 0, proof_required = 0;
+    result = oa_xpc_client_call(client.get(), frame, length, one_way ? 1 : 0,
+        native_deadline, cancellation ? cancellation->xpc : nullptr, sent, &bytes, &size,
+        &proof_attribute, &proof_required);
+    std::unique_ptr<void, decltype(&oa_xpc_bytes_free)> owned(bytes, oa_xpc_bytes_free);
+    if (result != OA_XPC_OK) return xpc_status(result);
+    if (size > max_reply || (size && !bytes)) return OA_IPC_IO_ERROR;
+    if (!one_way) {
+        auto out = std::make_unique<oa_ipc_reply>();
+        if (size) {
+            const auto* begin = static_cast<const unsigned char*>(bytes);
+            out->bytes.assign(begin, begin + size);
+        }
+        *reply = out.release();
+    }
+    return OA_IPC_OK;
+}
+#endif
 } // namespace
 
 extern "C" {
@@ -335,6 +489,14 @@ oa_ipc_status oa_ipc_session_call(const char* endpoint, size_t length, uint32_t 
         if (path.find('\0') != std::string::npos) return OA_IPC_INVALID_ARGUMENT;
         const auto* frame = static_cast<const unsigned char*>(frame_bytes);
         const bool one_way = (flags & OA_IPC_CALL_ONE_WAY) != 0;
+        if (path.compare(0, 4, "xpc:") == 0) {
+#ifdef __APPLE__
+            return xpc_call(path, deadline, cancellation, expectation, frame,
+                frame_length, max_reply, one_way, reply, sent);
+#else
+            return OA_IPC_PROOF_UNAVAILABLE;
+#endif
+        }
         const auto key = pool_key(path, expectation);
         if (is_single(key, SessionClock::now()))
             return single_call(path, deadline, cancellation, expectation, frame, frame_length, max_reply, one_way, reply, sent);
@@ -350,7 +512,8 @@ oa_ipc_status oa_ipc_session_call(const char* endpoint, size_t length, uint32_t 
             if (fresh) {
                 if ((status = open_for(path, deadline, cancellation, expectation, &c.c)) != OA_IPC_OK) return status;
                 put_u32(header, request_header);
-                if ((status = write_all(c.c, header, 4, &moved)) != OA_IPC_OK) return status;
+                if ((status = write_all(c.c, header, 4, &moved)) != OA_IPC_OK)
+                    return refusal_after_write_error(c.c, status, true);
                 status = read_exact(c.c, header, 4, &got);
                 if (status != OA_IPC_OK) {
                     if (got == 0 && (status == OA_IPC_DISCONNECTED || status == OA_IPC_IO_ERROR)) {
@@ -362,18 +525,19 @@ oa_ipc_status oa_ipc_session_call(const char* endpoint, size_t length, uint32_t 
                     return status;
                 }
                 const uint32_t answer = get_u32(header);
+                if (answer == kProofRefusal) return read_proof_refusal(c.c);
                 if (answer == kSessionClosing) continue;
                 if (answer == kSessionDecline || answer == kSessionUnsupported) {
                     if (answer == kSessionUnsupported) mark_single(key);
                     status = write_all(c.c, frame, frame_length, &moved);
                     *sent = moved;
-                    if (status != OA_IPC_OK) return status;
+                    if (status != OA_IPC_OK) return refusal_after_write_error(c.c, status);
                     return finish_single(c.c, max_reply, one_way, reply);
                 }
                 if (answer != kSessionAccept) return OA_IPC_IO_ERROR;
                 status = write_all(c.c, frame, frame_length, &moved);
                 *sent = moved;
-                if (status != OA_IPC_OK) return status;
+                if (status != OA_IPC_OK) return refusal_after_write_error(c.c, status);
             } else {
                 c.c->stream.rearm(deadline, state);
                 std::vector<unsigned char> request(4 + frame_length);
@@ -381,15 +545,19 @@ oa_ipc_status oa_ipc_session_call(const char* endpoint, size_t length, uint32_t 
                 if (frame_length) std::memcpy(request.data() + 4, frame, frame_length);
                 status = write_all(c.c, request.data(), request.size(), &moved);
                 if (status != OA_IPC_OK) {
-                    // An incomplete request on a pooled connection is never
-                    // dispatched; a stopped wait is the caller's answer.
-                    if (status == OA_IPC_TIMEOUT || status == OA_IPC_CANCELLED || status == OA_IPC_UNTRUSTED) return status;
-                    continue;
+                    *sent = moved > 4 ? std::min(moved - 4, frame_length) : 0;
+                    const auto result = refusal_after_write_error(c.c, status);
+                    // A failed write has an uncertain acceptance boundary. An
+                    // observed response, including a short one, is never a
+                    // replay invitation; zero response bytes cannot prove
+                    // that the peer missed the request either.
+                    return result;
                 }
                 *sent = frame_length;
             }
             if ((status = read_exact(c.c, header, 4, &got)) != OA_IPC_OK) return status;
             const uint32_t answer = get_u32(header);
+            if (answer == kProofRefusal) return read_proof_refusal(c.c);
             if (answer == kSessionClosing) { *sent = 0; continue; }
             if (answer & kOneWayFlag) return OA_IPC_IO_ERROR;
             const uint32_t reply_length = answer & kLengthMask;

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.19)
 project(abstraction_ipc_node LANGUAGES CXX)
 find_package(abstraction_ipc CONFIG REQUIRED)
 get_target_property(ipc_type abstraction::ipc TYPE)
@@ -25,4 +25,13 @@ elseif(APPLE)
 endif()
 set_target_properties(oa_ipc_node PROPERTIES PREFIX "" SUFFIX ".node")
 install(TARGETS oa_ipc_node LIBRARY DESTINATION native RUNTIME DESTINATION native)
-install(FILES package.json index.js index.d.ts bun.js bun.d.ts bun-worker.js README.md DESTINATION .)
+# The source package uses optional per-platform binary packages at publication.
+# This CMake installation carries its own built addon, so its npm files list
+# must name that binary when a source-built package is packed for a client.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/package.json")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/package.json" package_json)
+string(JSON files_length LENGTH "${package_json}" files)
+string(JSON installed_package_json SET "${package_json}" files "${files_length}" "\"native/oa_ipc_node.node\"")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/package.json" "${installed_package_json}\n")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/package.json" index.js index.d.ts bun.js bun.d.ts bun-worker.js
+  platform.js platform.d.ts README.md DESTINATION .)

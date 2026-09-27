@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -34,6 +38,7 @@ type sessionServer struct {
 	physical *countingListener
 	l        Listener
 	calls    atomic.Int32
+	attempts atomic.Int32
 	frames   chan []byte
 	pids     chan int
 	wg       sync.WaitGroup
@@ -42,6 +47,10 @@ type sessionServer struct {
 // serveSessions runs a framed echo host on a session listener: each accepted
 // Conn is one exchange, handled exactly as a single-exchange host handles it.
 func serveSessions(t *testing.T, opts SessionOptions, need identity.Need, handle func(*FramedCall) error) *sessionServer {
+	return serveSessionsWithNeeds(t, opts, func(int32) identity.Need { return need }, handle)
+}
+
+func serveSessionsWithNeeds(t *testing.T, opts SessionOptions, needAt func(int32) identity.Need, handle func(*FramedCall) error) *sessionServer {
 	t.Helper()
 	endpoint := framedEndpoint(t)
 	inner, err := Listen(endpoint)
@@ -63,7 +72,7 @@ func serveSessions(t *testing.T, opts SessionOptions, need identity.Need, handle
 				defer s.wg.Done()
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				k, err := ReceiveFramed(ctx, c, need, 0)
+				k, err := ReceiveFramed(ctx, c, needAt(s.attempts.Add(1)), 0)
 				if err != nil {
 					return
 				}
@@ -95,6 +104,234 @@ func echo(k *FramedCall) error {
 	return k.Reply(k.Frame)
 }
 
+func TestFreshSessionCallerProofRefusalIsTerminal(t *testing.T) {
+	for _, oneWay := range []bool{false, true} {
+		s := serveSessions(t, SessionOptions{}, identity.Need{User: identity.ProofSigned}, echo)
+		client := FrameClient{Endpoint: s.endpoint, Timeout: 2 * time.Second, Sessions: true}
+		var err error
+		if oneWay {
+			err = client.WriteFrame([]byte("one-way"))
+		} else {
+			_, err = client.ExchangeFrame([]byte("effect"))
+		}
+		var refusal *ProofRefusal
+		if !errors.As(err, &refusal) || refusal.Attribute != "user" || refusal.Required != identity.ProofSigned {
+			t.Fatalf("oneWay=%t refusal=%v", oneWay, err)
+		}
+		if got := s.calls.Load(); got != 0 {
+			t.Fatalf("refused request dispatched %d times", got)
+		}
+		if got := s.physical.accepted.Load(); got != 1 {
+			t.Fatalf("terminal refusal opened %d connections", got)
+		}
+	}
+}
+
+type failedSessionWriteConn struct {
+	net.Conn
+	response io.Reader
+	writes   int
+}
+
+func (c *failedSessionWriteConn) Read(p []byte) (int, error) { return c.response.Read(p) }
+func (c *failedSessionWriteConn) Write([]byte) (int, error) {
+	c.writes++
+	return 0, syscall.EPIPE
+}
+
+func TestSessionWriteFailureRecognizesOnlyCompleteProofRefusal(t *testing.T) {
+	marker := proofRefusalBytes(&identity.ProofError{Attribute: "user", Want: identity.ProofSigned})
+	tests := []struct {
+		name        string
+		response    []byte
+		wantRefusal bool
+	}{
+		{"complete refusal", marker[:], true},
+		{"partial header", marker[:3], false},
+		{"partial tokens", marker[:5], false},
+		{"wrong marker", []byte{0x80, 0, 0, 0}, false},
+		{"EOF", nil, false},
+	}
+	for _, pooled := range []bool{false, true} {
+		for _, oneWay := range []bool{false, true} {
+			for _, tc := range tests {
+				t.Run(fmt.Sprintf("pooled=%t/oneWay=%t/%s", pooled, oneWay, tc.name), func(t *testing.T) {
+					response := append([]byte(nil), tc.response...)
+					if !pooled {
+						var accept [4]byte
+						binary.BigEndian.PutUint32(accept[:], sessionAccept)
+						response = append(accept[:], response...)
+					}
+					conn := &failedSessionWriteConn{response: bytes.NewReader(response)}
+					if !pooled {
+						ack, _, err := readUint32(conn)
+						if err != nil || ack != sessionAccept {
+							t.Fatalf("session acceptance = %#x, %v", ack, err)
+						}
+					}
+					frame := []byte("effect")
+					flags := sessionFlag | uint32(len(frame))
+					if oneWay {
+						flags |= oneWayFlag
+					}
+					var writeErr error
+					if pooled {
+						_, writeErr = writeHeadedCount(conn, flags, frame)
+					} else {
+						writeErr = writeAll(conn, frame)
+					}
+					if !errors.Is(writeErr, syscall.EPIPE) || conn.writes != 1 {
+						t.Fatalf("write error = %v, writes = %d", writeErr, conn.writes)
+					}
+					got := refusalAfterWriteError(context.Background(), conn, writeErr, false)
+					var refusal *ProofRefusal
+					if tc.wantRefusal {
+						if !errors.As(got, &refusal) || refusal.Attribute != "user" || refusal.Required != identity.ProofSigned {
+							t.Fatalf("proof refusal = %v", got)
+						}
+					} else if !errors.Is(got, syscall.EPIPE) {
+						t.Fatalf("original write error = %v", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSessionWriteFailureRefusalReadUsesCallDeadline(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	if err := client.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	got := refusalAfterWriteError(ctx, client, syscall.EPIPE, false)
+	if !errors.Is(got, syscall.EPIPE) {
+		t.Fatalf("deadline-bound refusal read = %v", got)
+	}
+}
+
+func TestFreshSessionHeaderWriteFailureUsesTerminalRefusal(t *testing.T) {
+	marker := proofRefusalBytes(&identity.ProofError{Attribute: "user", Want: identity.ProofSigned})
+	invalid := marker
+	invalid[4] = 0xFF
+	for _, oneWay := range []bool{false, true} {
+		for _, tc := range []struct {
+			name        string
+			response    []byte
+			wantRefusal bool
+		}{
+			{"accepted", appendSessionWord(sessionAccept, marker[:]), true},
+			{"declined", appendSessionWord(sessionDecline, marker[:]), true},
+			{"unsupported", appendSessionWord(sessionUnsupported, marker[:]), true},
+			{"direct refusal", marker[:], true},
+			{"partial acceptance", []byte{0x80, 0}, false},
+			{"partial refusal", appendSessionWord(sessionAccept, marker[:5]), false},
+			{"invalid refusal", appendSessionWord(sessionAccept, invalid[:]), false},
+			{"other answer", []byte{0, 0, 0, 1}, false},
+			{"EOF", nil, false},
+		} {
+			t.Run(fmt.Sprintf("oneWay=%t/%s", oneWay, tc.name), func(t *testing.T) {
+				conn := &failedSessionWriteConn{response: bytes.NewReader(tc.response)}
+				flags := sessionFlag | 6
+				if oneWay {
+					flags |= oneWayFlag
+				}
+				got := writeFreshSessionHeader(context.Background(), conn, flags)
+				assertSessionWriteFailure(t, got, tc.wantRefusal)
+				if conn.writes != 1 {
+					t.Fatalf("header writes = %d, want 1", conn.writes)
+				}
+			})
+		}
+	}
+}
+
+func TestDeclinedSessionBodyWriteFailureUsesTerminalRefusal(t *testing.T) {
+	marker := proofRefusalBytes(&identity.ProofError{Attribute: "user", Want: identity.ProofSigned})
+	for _, answer := range []uint32{sessionDecline, sessionUnsupported} {
+		for _, oneWay := range []bool{false, true} {
+			for _, tc := range []struct {
+				name        string
+				response    []byte
+				wantRefusal bool
+			}{
+				{"complete refusal", marker[:], true},
+				{"partial refusal", marker[:5], false},
+				{"EOF", nil, false},
+			} {
+				t.Run(fmt.Sprintf("answer=%#x/oneWay=%t/%s", answer, oneWay, tc.name), func(t *testing.T) {
+					conn := &failedSessionWriteConn{response: bytes.NewReader(appendSessionWord(answer, tc.response))}
+					gotAnswer, _, err := readUint32(conn)
+					if err != nil || gotAnswer != answer {
+						t.Fatalf("session answer = %#x, %v", gotAnswer, err)
+					}
+					_, got := singleOnSession(context.Background(), conn, []byte("effect"), DefaultMaxFrame, oneWay)
+					assertSessionWriteFailure(t, got, tc.wantRefusal)
+					if conn.writes != 1 {
+						t.Fatalf("body writes = %d, want 1", conn.writes)
+					}
+				})
+			}
+		}
+	}
+}
+
+func appendSessionWord(word uint32, tail []byte) []byte {
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], word)
+	return append(header[:], tail...)
+}
+
+func assertSessionWriteFailure(t *testing.T, got error, wantRefusal bool) {
+	t.Helper()
+	var refusal *ProofRefusal
+	if wantRefusal {
+		if !errors.As(got, &refusal) || refusal.Attribute != "user" || refusal.Required != identity.ProofSigned {
+			t.Fatalf("proof refusal = %v", got)
+		}
+	} else if !errors.Is(got, syscall.EPIPE) {
+		t.Fatalf("original write error = %v", got)
+	}
+}
+
+func TestPooledSessionCallerProofRefusalIsTerminal(t *testing.T) {
+	for _, oneWay := range []bool{false, true} {
+		s := serveSessionsWithNeeds(t, SessionOptions{}, func(attempt int32) identity.Need {
+			if attempt == 1 {
+				return framingNeed
+			}
+			return identity.Need{User: identity.ProofSigned}
+		}, echo)
+		client := FrameClient{Endpoint: s.endpoint, Timeout: 2 * time.Second, Sessions: true}
+		if reply, err := client.ExchangeFrame([]byte("warm")); err != nil || string(reply) != "warm" {
+			t.Fatalf("warm exchange=%q, %v", reply, err)
+		}
+		var err error
+		if oneWay {
+			err = client.WriteFrame([]byte("one-way"))
+		} else {
+			_, err = client.ExchangeFrame([]byte("effect"))
+		}
+		var refusal *ProofRefusal
+		if !errors.As(err, &refusal) || refusal.Attribute != "user" || refusal.Required != identity.ProofSigned {
+			t.Fatalf("oneWay=%t refusal=%v", oneWay, err)
+		}
+		if got := s.calls.Load(); got != 1 {
+			t.Fatalf("server dispatched %d calls, want warmup only", got)
+		}
+		if got := s.attempts.Load(); got != 2 {
+			t.Fatalf("server attempted %d calls, want two without replay", got)
+		}
+		if got := s.physical.accepted.Load(); got != 1 {
+			t.Fatalf("refusal opened %d physical connections", got)
+		}
+	}
+}
+
 func TestSessionCarriesSequentialExchangesOnOneConnection(t *testing.T) {
 	s := serveSessions(t, SessionOptions{}, framingNeed, echo)
 	client := FrameClient{Endpoint: s.endpoint, Timeout: 2 * time.Second, Sessions: true}
@@ -118,6 +355,211 @@ func TestSessionCarriesSequentialExchangesOnOneConnection(t *testing.T) {
 	}
 	if got := s.physical.accepted.Load(); got != 1 {
 		t.Fatalf("%d connections carried 25 calls, want 1", got)
+	}
+}
+
+func TestBusySessionRenewsBindingBeforeAnotherRequest(t *testing.T) {
+	s := serveSessions(t, SessionOptions{MaxAge: 40 * time.Millisecond, Idle: time.Second}, framingNeed, echo)
+	client := FrameClient{Endpoint: s.endpoint, Timeout: 2 * time.Second, Sessions: true}
+	for i := 0; i < 8; i++ {
+		if reply, err := client.ExchangeFrame([]byte("busy")); err != nil || string(reply) != "busy" {
+			t.Fatalf("exchange %d: %q, %v", i, reply, err)
+		}
+		<-s.frames
+		time.Sleep(15 * time.Millisecond)
+	}
+	if got := s.calls.Load(); got != 8 {
+		t.Fatalf("%d dispatched calls, want eight", got)
+	}
+	if got := s.physical.accepted.Load(); got < 2 {
+		t.Fatalf("%d physical connections kept the original binding beyond MaxAge", got)
+	}
+}
+
+func TestSessionMaxAgeCannotExceedVerdictBound(t *testing.T) {
+	s := serveSessions(t, SessionOptions{MaxAge: time.Hour}, framingNeed, echo)
+	if got := s.l.(*sessionListener).opts.MaxAge; got != DefaultSessionMaxAge {
+		t.Fatalf("session MaxAge %s exceeds verdict bound %s", got, DefaultSessionMaxAge)
+	}
+}
+
+func TestSessionDeadlineUsesRemainingEvidenceLifetime(t *testing.T) {
+	boundAt := time.Now()
+	evidenceUntil := boundAt.Add(30 * time.Second)
+	if got := sessionDeadline(boundAt, DefaultSessionMaxAge, evidenceUntil); !got.Equal(evidenceUntil) {
+		t.Fatalf("session deadline %s extends older evidence past %s", got, evidenceUntil)
+	}
+	if got := sessionDeadline(boundAt, 10*time.Second, evidenceUntil); !got.Equal(boundAt.Add(10 * time.Second)) {
+		t.Fatalf("shorter configured age was lost: %s", got)
+	}
+}
+
+func TestSessionAcceptedCallCanReplyAfterBindingExpiry(t *testing.T) {
+	s := serveSessions(t, SessionOptions{MaxAge: 40 * time.Millisecond}, framingNeed, func(k *FramedCall) error {
+		time.Sleep(90 * time.Millisecond)
+		return k.Reply(k.Frame)
+	})
+	client := FrameClient{Endpoint: s.endpoint, Timeout: 2 * time.Second, Sessions: true}
+	if reply, err := client.ExchangeFrame([]byte("accepted")); err != nil || string(reply) != "accepted" {
+		t.Fatalf("accepted call after binding expiry: %q, %v", reply, err)
+	}
+}
+
+func TestSessionDoesNotDispatchBodyCompletedAfterBindingExpiry(t *testing.T) {
+	s := serveSessions(t, SessionOptions{MaxAge: 40 * time.Millisecond}, framingNeed, echo)
+	conn, err := dialFramed(context.Background(), s.endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeUint32(conn, sessionFlag|2); err != nil {
+		t.Fatal(err)
+	}
+	if ack, _, err := readUint32(conn); err != nil || ack != sessionAccept {
+		t.Fatalf("session acknowledgement %#x, %v", ack, err)
+	}
+	if _, err := conn.Write([]byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(90 * time.Millisecond)
+	// The peer may close as soon as it notices expiry. Either way the second
+	// byte must never turn the old binding into a dispatched frame.
+	conn.Write([]byte("b"))
+	var b [1]byte
+	_, err = conn.Read(b[:])
+	if err == nil {
+		t.Fatalf("expired request received response byte %#x", b[0])
+	}
+	if got := s.calls.Load(); got != 0 {
+		t.Fatalf("%d frames dispatched after binding expiry", got)
+	}
+}
+
+type completeWriteErrorConn struct {
+	net.Conn
+	dispatched  <-chan []byte
+	failure     error
+	underreport bool
+}
+
+type partialWriteErrorConn struct {
+	net.Conn
+	failure error
+}
+
+func (c *partialWriteErrorConn) SyscallConn() (syscall.RawConn, error) {
+	return c.Conn.(syscall.Conn).SyscallConn()
+}
+
+func (c *partialWriteErrorConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p[:len(p)-1])
+	if err != nil {
+		return n, err
+	}
+	return n, c.failure
+}
+
+func (c *completeWriteErrorConn) SyscallConn() (syscall.RawConn, error) {
+	return c.Conn.(syscall.Conn).SyscallConn()
+}
+
+func (c *completeWriteErrorConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if err != nil || n != len(p) {
+		return n, err
+	}
+	select {
+	case <-c.dispatched:
+		if c.underreport {
+			return 0, c.failure
+		}
+		return n, c.failure
+	case <-time.After(2 * time.Second):
+		return n, errors.New("server did not dispatch the complete request")
+	}
+}
+
+func TestPooledSessionDoesNotReplayACompleteWriteWithError(t *testing.T) {
+	s := serveSessions(t, SessionOptions{}, framingNeed, echo)
+	client := FrameClient{Endpoint: s.endpoint, Timeout: 2 * time.Second, Sessions: true}
+	if _, err := client.ExchangeFrame([]byte("warm")); err != nil {
+		t.Fatal(err)
+	}
+	<-s.frames
+	failure := errors.New("injected error after complete request write")
+	key := client.poolKey()
+	frames.mu.Lock()
+	idle := frames.idle[key]
+	if len(idle) != 1 {
+		frames.mu.Unlock()
+		t.Fatalf("%d pooled connections, want one", len(idle))
+	}
+	idle[0].conn.Conn = &completeWriteErrorConn{Conn: idle[0].conn.Conn, dispatched: s.frames, failure: failure}
+	frames.mu.Unlock()
+	_, err := client.ExchangeFrame([]byte("effect"))
+	if !errors.Is(err, failure) {
+		t.Fatalf("complete write error was retried or lost: %v", err)
+	}
+	if got := s.calls.Load(); got != 2 {
+		t.Fatalf("server dispatched %d calls, want warmup and one effect", got)
+	}
+}
+
+func TestPooledWindowsSessionDoesNotReplayAnUnderreportedWrite(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows overlapped pipe write counts can underreport accepted bytes on failure")
+	}
+	s := serveSessions(t, SessionOptions{}, framingNeed, echo)
+	client := FrameClient{Endpoint: s.endpoint, Timeout: 2 * time.Second, Sessions: true}
+	if _, err := client.ExchangeFrame([]byte("warm")); err != nil {
+		t.Fatal(err)
+	}
+	<-s.frames
+	failure := errors.New("injected failed write with an unreported complete request")
+	key := client.poolKey()
+	frames.mu.Lock()
+	idle := frames.idle[key]
+	if len(idle) != 1 {
+		frames.mu.Unlock()
+		t.Fatalf("%d pooled connections, want one", len(idle))
+	}
+	idle[0].conn.Conn = &completeWriteErrorConn{Conn: idle[0].conn.Conn, dispatched: s.frames, failure: failure, underreport: true}
+	frames.mu.Unlock()
+	_, err := client.ExchangeFrame([]byte("effect"))
+	if !errors.Is(err, failure) {
+		t.Fatalf("underreported write error was retried or lost: %v", err)
+	}
+	if got := s.calls.Load(); got != 2 {
+		t.Fatalf("server dispatched %d calls, want warmup and one effect", got)
+	}
+}
+
+func TestPooledSessionDoesNotReplayAnIncompleteRequest(t *testing.T) {
+	s := serveSessions(t, SessionOptions{}, framingNeed, echo)
+	client := FrameClient{Endpoint: s.endpoint, Timeout: 2 * time.Second, Sessions: true}
+	if _, err := client.ExchangeFrame([]byte("warm")); err != nil {
+		t.Fatal(err)
+	}
+	<-s.frames
+	key := client.poolKey()
+	frames.mu.Lock()
+	idle := frames.idle[key]
+	if len(idle) != 1 {
+		frames.mu.Unlock()
+		t.Fatalf("%d pooled connections, want one", len(idle))
+	}
+	failure := errors.New("injected short write")
+	idle[0].conn.Conn = &partialWriteErrorConn{Conn: idle[0].conn.Conn, failure: failure}
+	frames.mu.Unlock()
+	reply, err := client.ExchangeFrame([]byte("effect"))
+	if !errors.Is(err, failure) {
+		t.Fatalf("incomplete write error was lost: %q, %v", reply, err)
+	}
+	if got := s.calls.Load(); got != 1 {
+		t.Fatalf("server dispatched %d calls, want warmup only", got)
 	}
 }
 
@@ -393,5 +835,46 @@ func TestSessionCancelledCallIsNotReused(t *testing.T) {
 	}
 	if got := s.physical.accepted.Load(); got != 2 {
 		t.Fatalf("%d connections, want 2: the cancelled one must not be reused", got)
+	}
+}
+
+// A failed deadline does not prove that Read will fail or remain bounded.
+type refusedIdleDeadlineConn struct {
+	bufferedSessionConn
+	reads  int
+	closed bool
+}
+
+func (c *refusedIdleDeadlineConn) SetDeadline(time.Time) error { return errors.New("deadline refused") }
+func (c *refusedIdleDeadlineConn) Read(p []byte) (int, error) {
+	c.reads++
+	return c.bufferedSessionConn.Read(p)
+}
+func (c *refusedIdleDeadlineConn) Close() error { c.closed = true; return nil }
+
+func TestSessionClosesWhenIdleDeadlineCannotBeSet(t *testing.T) {
+	pc := &refusedIdleDeadlineConn{bufferedSessionConn: bufferedSessionConn{input: bytes.NewReader(nil)}}
+	l := &sessionListener{calls: make(chan Conn), done: make(chan struct{}),
+		opts: SessionOptions{Idle: time.Second, MaxAge: time.Minute}, sessions: map[*session]struct{}{}}
+	defer close(l.done)
+	s := &session{l: l, pc: pc}
+	l.sessions[s] = struct{}{}
+	finished := make(chan struct{})
+	go func() { s.run(sessionFlag); close(finished) }()
+	select {
+	case conn := <-l.calls:
+		call := conn.(*sessionCall)
+		call.continued = true
+		close(call.done)
+	case <-time.After(time.Second):
+		t.Fatal("first call was not delivered")
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("session did not close after deadline failure")
+	}
+	if pc.reads != 0 || !pc.closed || len(l.sessions) != 0 {
+		t.Fatalf("deadline failure: reads=%d closed=%t retained=%d", pc.reads, pc.closed, len(l.sessions))
 	}
 }

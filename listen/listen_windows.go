@@ -231,6 +231,7 @@ func (l *pipeListener) connected(a *armedAccept) (Conn, error) {
 	var info fileCompletionInformation
 	if err := windows.NtSetInformationFile(windows.Handle(h), &windows.IO_STATUS_BLOCK{},
 		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), windows.FileReplaceCompletionInformation); err != nil {
+		//unchecked: best-effort cleanup on an error path that already returns the NtSetInformationFile failure
 		syscall.CloseHandle(h)
 		return nil, fmt.Errorf("listen: the connected pipe could not leave its accept port: %w", err)
 	}

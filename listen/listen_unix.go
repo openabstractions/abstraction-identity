@@ -43,6 +43,9 @@ type unixListener struct {
 // only the holder ever removes one, and two starts race on the lock rather
 // than on the address.
 func Listen(path string) (Listener, error) {
+	if listener, handled, err := listenMessageEndpoint(path); handled {
+		return listener, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}

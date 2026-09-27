@@ -42,7 +42,9 @@ var packageInstallPath = packagePathByFullName
 // with an installed package's identity (Invoke-CommandInDesktopPackage), while
 // it cannot write into the package's folder under WindowsApps. Every other
 // caller, including a descendant of a packaged app, which has no identity of its
-// own, is its clean absolute image path at pathProof or better.
+// own, is its clean absolute image path at pathProof or better, canonicalized:
+// a peer launched through a short DOS 8.3 alias names the same subject as one
+// launched through the long spelling of the same file (CanonicalProgramPath).
 func SubjectProgram(p *Peer, pathProof Proof) (string, error) {
 	if p == nil {
 		return "", errors.New("identity: no peer")
@@ -62,13 +64,30 @@ func SubjectProgram(p *Peer, pathProof Proof) (string, error) {
 			}
 		}
 	}
-	return path, nil
+	return CanonicalProgramPath(path), nil
 }
 
 // within reports whether path lies inside folder, comparing case-insensitively
 // as Windows paths compare.
 func within(path, folder string) bool {
 	return len(path) > len(folder)+1 && strings.EqualFold(path[:len(folder)], folder) && os.IsPathSeparator(path[len(folder)])
+}
+
+// canonicalProgramPath resolves a platform-specific alternate spelling of an
+// existing path to the one spelling the OS reports for it. Every platform
+// starts with the identity function here; win32_windows.go replaces it with
+// one that expands a Windows short DOS 8.3 name.
+var canonicalProgramPath = func(path string) string { return path }
+
+// CanonicalProgramPath resolves path to the one spelling it treats as the
+// true name of the file it names: on Windows, a short DOS 8.3 name component
+// expands to its long form. A short-name spelling and a long-name spelling of
+// the same program compare equal under CanonicalProgramPath. A path this
+// cannot resolve, including one that names no existing file, comes back
+// unchanged: an exact comparison against it still refuses exactly what it
+// refused before.
+func CanonicalProgramPath(path string) string {
+	return canonicalProgramPath(path)
 }
 
 // ValidSubjectProgram reports whether program is a subject program as

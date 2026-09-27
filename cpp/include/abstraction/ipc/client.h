@@ -24,20 +24,28 @@ enum { OA_IPC_OK = 0, OA_IPC_TIMEOUT = 1, OA_IPC_DISCONNECTED = 2,
        OA_IPC_UNTRUSTED = 8, OA_IPC_PROOF_UNAVAILABLE = 9 };
 /* ABI version 1: shared native client primitives and local bootstrap. */
 OA_IPC_API uint32_t oa_ipc_version(void);
+/* Optional ABI-1 transport support query; missing symbol means no new features.
+   A wrapper must check XPC support before passing that endpoint to an older
+   library, which may otherwise interpret it as a Unix socket path. */
+enum { OA_IPC_FEATURE_XPC = 1 };
+OA_IPC_API uint32_t oa_ipc_features(void);
 /* Additive ABI-1 bootstrap extension; no connection or service activation.
    required receives byte size INCLUDING trailing NUL. Query with NULL,0.
    On success a supplied buffer contains that NUL-terminated endpoint; the
    caller owns all memory. Insufficient capacity returns INVALID_ARGUMENT and
    leaves buffer untouched, with required updated. Other failures set required
    to zero. Nonzero capacity requires buffer; required must be non-NULL.
-   Each call observes current environment/process identity independently; if
-   configuration changes between query and copy, retry using the new size.
+   Each call observes current environment/process identity independently;
+   macOS returns the installed LaunchAgent's fixed XPC name and ignores the
+   environment override. If configuration changes between query and copy, retry using the new size.
    Keep environment mutation synchronized with callers. */
 OA_IPC_API oa_ipc_status oa_ipc_runtime_endpoint(char* buffer, size_t capacity,
                                                size_t* required);
 /* Establish ONE monotonic deadline, consumed by connect and every later I/O.
    endpoint is an explicit byte span (no embedded NUL). Windows accepts local
    ASCII named-pipe paths only; POSIX accepts Unix socket filesystem paths.
+   xpc:service endpoints require the framed oa_ipc_session_call entry point;
+   raw stream open returns INVALID_ARGUMENT for that endpoint kind.
    On failure *out is NULL. timeout_ms=0 expires immediately. */
 OA_IPC_API oa_ipc_status oa_ipc_open(const char* endpoint, size_t length,
                                     uint32_t timeout_ms, oa_ipc_connection** out);
@@ -83,8 +91,10 @@ typedef struct oa_ipc_server_expectation {
    until release and may be passed to open_verified, which copies it.
    Windows reads the exact registered MSI product under the current account;
    Linux reads the loaded user runtime unit through a bounded native manager
-   query and selects its executable/current uid. Missing/ambiguous installation
-   is UNTRUSTED. Unsupported platform facilities are PROOF_UNAVAILABLE.
+   query and selects its executable/current uid. macOS validates the per-user
+   LaunchAgent with native property-list parsing and selects its fixed XPC
+   service, executable and current uid. Missing/ambiguous installation is
+   UNTRUSTED. Unsupported platform facilities are PROOF_UNAVAILABLE.
    No endpoint environment override supplies trust.
    Cancellation/deadline are checked around synchronous OS metadata calls; those
    native calls cannot be interrupted individually. Failure sets *out=NULL. */
@@ -125,12 +135,20 @@ OA_IPC_API void oa_ipc_close(oa_ipc_connection*);
    connection per call for 30 seconds. Use it only where the server answers or
    closes an oversized header; a server that does neither makes the call wait
    for its deadline.
+   On macOS, xpc:service uses authenticated message exchange through the shared
+   Darwin transport. A server expectation is required. Its trusted program file
+   supplies the designated code requirement; the peer must also satisfy the
+   expected principal and program path. Each call currently opens a fresh XPC
+   session. Other platforms return PROOF_UNAVAILABLE for xpc: endpoints.
    On success an exchange sets *reply (release with oa_ipc_reply_release); a
    one-way call sets it to NULL. *sent receives the request bytes written to a
    connection that was never reported closed before reading them; a failure
    with *sent equal to the frame length may have reached the server. A request
    the server announced it did not read (closing marker) is repeated once on a
-   new connection within the same budget. */
+   new connection within the same budget. Payloads use the low 30 length bits.
+   An explicit receiver caller-proof refusal is terminal and returns
+   PROOF_UNAVAILABLE with no reply; status 9 also covers locally unavailable
+   proof facilities. */
 enum { OA_IPC_CALL_ONE_WAY = 1 };
 typedef struct oa_ipc_reply oa_ipc_reply;
 OA_IPC_API oa_ipc_status oa_ipc_session_call(const char* endpoint, size_t length,

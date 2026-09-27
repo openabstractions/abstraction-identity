@@ -72,6 +72,7 @@ func ownerOf(client, server netip.AddrPort) (tcpOwner, bool, error) {
 	size := uint32(64 * 1024)
 	for attempt := 0; attempt < 8; attempt++ {
 		buf := make([]byte, size)
+		//unchecked: Call's error is the raw GetLastError, not meaningful without a failed primary return, which is checked below
 		r, _, _ := procGetExtendedTcpTable.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size)), 0, windows.AF_INET, tcpTableOwnerPIDConnections, 0)
 		if r == errorInsufficientBuffer {
 			size += 16 * 1024
@@ -147,10 +148,12 @@ func bindLoopback(client, server netip.AddrPort, opts *Options) (binder, *Peer, 
 	}
 	b := &loopbackWindowsBinding{client: client, server: server, proc: proc, pid: owner.pid}
 	if b.started, err = processStartTime(proc); err != nil {
+		//unchecked: best-effort handle release on an error path that already returns the processStartTime failure
 		b.release()
 		return nil, nil, fmt.Errorf("%w: the creator's start time could not be read: %v", ErrNoBinding, err)
 	}
 	if connectedAt := opts.connectedAt(); b.started.After(connectedAt) {
+		//unchecked: best-effort handle release on an error path that already returns the start-time mismatch
 		b.release()
 		return nil, nil, fmt.Errorf("%w: pid %d belongs to a process created at %s, after this connection existed at %s",
 			ErrPeerMoved, owner.pid, b.started.Format(time.RFC3339Nano), connectedAt.Format(time.RFC3339Nano))
@@ -158,11 +161,13 @@ func bindLoopback(client, server netip.AddrPort, opts *Options) (binder, *Peer, 
 	// The table is read again with the process pinned, so the pid the row names
 	// cannot have been reassigned between the two reads.
 	if err := b.recheck(); err != nil {
+		//unchecked: best-effort handle release on an error path that already returns the recheck failure
 		b.release()
 		return nil, nil, err
 	}
 	peer, err := b.peer(opts)
 	if err != nil {
+		//unchecked: best-effort handle release on an error path that already returns the peer lookup failure
 		b.release()
 		return nil, nil, err
 	}
@@ -196,10 +201,11 @@ func (b *loopbackWindowsBinding) peer(opts *Options) (*Peer, error) {
 	}
 	if opts.skipCodeSignature() {
 		p.Code = unknown[Code]("code", "signature verification was skipped by the caller")
-	} else if code, verdict, err := verifyProcessImage(b.proc, b.pid, b.started, imagePath, opts); err != nil {
+	} else if code, verdict, verifiedAt, err := verifyProcessImageAt(b.proc, b.pid, b.started, imagePath, opts); err != nil {
 		p.Code = unknown[Code]("code", "verification could not be performed: "+err.Error())
 	} else {
 		p.recordCode(code, verdict, "Authenticode verified the file at the peer's image path, not the image the peer is executing")
+		p.evidenceValidUntil = verifiedAt.Add(codeVerdictLifetime)
 	}
 	p.note("transport: a loopback TCP connection carries no credentials; the process came from the TCP owner table")
 	return p, nil

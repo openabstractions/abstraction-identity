@@ -26,6 +26,9 @@ func frameLimit(n uint32) uint32 {
 	if n == 0 {
 		return DefaultMaxFrame
 	}
+	if n > lengthMask {
+		return lengthMask
+	}
 	return n
 }
 func writeFrame(w io.Writer, frame []byte, limit uint32) error {
@@ -38,6 +41,13 @@ func writeFrame(w io.Writer, frame []byte, limit uint32) error {
 // writeHeaded writes a header value and its payload, in one write when the
 // payload is small: each write is a system call, and on some hosts a wakeup.
 func writeHeaded(w io.Writer, header uint32, frame []byte) error {
+	_, err := writeHeadedCount(w, header, frame)
+	return err
+}
+
+// writeHeadedCount reports bytes accepted even when Write also reports an
+// error. The count describes this write's progress; it does not authorize replay.
+func writeHeadedCount(w io.Writer, header uint32, frame []byte) (int, error) {
 	var h [4]byte
 	binary.BigEndian.PutUint32(h[:], header)
 	parts := [][]byte{h[:], frame}
@@ -47,26 +57,35 @@ func writeHeaded(w io.Writer, header uint32, frame []byte) error {
 		copy(joined[4:], frame)
 		parts = [][]byte{joined}
 	}
+	written := 0
 	for _, part := range parts {
 		for len(part) > 0 {
 			n, err := w.Write(part)
+			if n < 0 || n > len(part) {
+				return written, io.ErrShortWrite
+			}
+			written += n
 			if err != nil {
-				return err
+				return written, err
 			}
 			if n <= 0 {
-				return io.ErrShortWrite
+				return written, io.ErrShortWrite
 			}
 			part = part[n:]
 		}
 	}
-	return nil
+	return written, nil
 }
 func readFrame(r io.Reader, limit uint32) ([]byte, error) {
 	var h [4]byte
 	if _, err := io.ReadFull(r, h[:]); err != nil {
 		return nil, err
 	}
-	return readFrameBody(r, binary.BigEndian.Uint32(h[:]), limit)
+	n := binary.BigEndian.Uint32(h[:])
+	if n == proofRefusalHeader {
+		return nil, readProofRefusal(r)
+	}
+	return readFrameBody(r, n, limit)
 }
 
 // WriteFrameTo writes the shared bounded wire frame to an authenticated stream.
@@ -95,6 +114,15 @@ func waitFrameEOF(r io.Reader) error {
 	var b [1]byte
 	n, err := r.Read(b[:])
 	if n != 0 {
+		if b[0] == 0xFF {
+			var rest [3]byte
+			if _, readErr := io.ReadFull(r, rest[:]); readErr != nil {
+				return readErr
+			}
+			if binary.BigEndian.Uint32([]byte{b[0], rest[0], rest[1], rest[2]}) == proofRefusalHeader {
+				return readProofRefusal(r)
+			}
+		}
 		return ErrUnexpectedResponse
 	}
 	if errors.Is(err, io.EOF) {
@@ -218,6 +246,9 @@ func (c FrameClient) WriteFrameContext(parent context.Context, frame []byte) err
 	}
 	ctx, cancel := frameContext(parent, c.Timeout)
 	defer cancel()
+	if _, handled, err := c.messageFrameCall(ctx, frame, true); handled {
+		return frameError(ctx, err)
+	}
 	if c.sessions(len(frame)) {
 		_, err := c.sessionCall(ctx, frame, limit, true)
 		if !errors.Is(err, errNoSession) {
@@ -230,9 +261,10 @@ func (c FrameClient) WriteFrameContext(parent context.Context, frame []byte) err
 		return frameError(ctx, err)
 	}
 	defer close()
-	if err = writeFrame(conn, frame, limit); err == nil {
-		err = waitFrameEOF(conn)
+	if err = writeFrame(conn, frame, limit); err != nil {
+		return frameError(ctx, refusalAfterWriteError(ctx, conn, err, false))
 	}
+	err = waitFrameEOF(conn)
 	return frameError(ctx, err)
 }
 
@@ -249,6 +281,9 @@ func (c FrameClient) ExchangeFrameContext(parent context.Context, frame []byte) 
 	}
 	ctx, cancel := frameContext(parent, c.Timeout)
 	defer cancel()
+	if reply, handled, err := c.messageFrameCall(ctx, frame, false); handled {
+		return reply, frameError(ctx, err)
+	}
 	if c.sessions(len(frame)) {
 		reply, err := c.sessionCall(ctx, frame, limit, false)
 		if !errors.Is(err, errNoSession) {
@@ -262,7 +297,7 @@ func (c FrameClient) ExchangeFrameContext(parent context.Context, frame []byte) 
 	}
 	defer close()
 	if err = writeFrame(conn, frame, limit); err != nil {
-		return nil, frameError(ctx, err)
+		return nil, frameError(ctx, refusalAfterWriteError(ctx, conn, err, false))
 	}
 	reply, err := readFrame(conn, limit)
 	return reply, frameError(ctx, err)
@@ -274,6 +309,7 @@ type FramedCall struct {
 	Caller        Seen
 	conn          Conn
 	binding       *identity.Binding
+	message       *receivedMessage
 	ctx           context.Context
 	cancel        context.CancelFunc
 	stop          func() bool
@@ -300,9 +336,17 @@ func (k *FramedCall) WaitContext() context.Context {
 		k.initWait()
 		k.watchDone = make(chan struct{})
 		go func() {
-			k.watchErr = waitFrameEOF(k.conn)
-			if !k.watchStopping.Load() || !os.IsTimeout(k.watchErr) {
+			if k.message != nil {
+				select {
+				case <-k.message.done:
+				case <-k.ctx.Done():
+				}
 				k.waitCancel()
+			} else {
+				k.watchErr = waitFrameEOF(k.conn)
+				if !k.watchStopping.Load() || !os.IsTimeout(k.watchErr) {
+					k.waitCancel()
+				}
 			}
 			close(k.watchDone)
 		}()
@@ -318,6 +362,9 @@ func (k *FramedCall) initWait() { k.waitCtx, k.waitCancel = context.WithCancel(k
 // the barrier; the original call deadline is restored before the write.
 func (k *FramedCall) finishWatching() error {
 	k.watchOnce.Do(k.initWait)
+	if k.message != nil {
+		return k.ctx.Err()
+	}
 	if k.watchDone == nil {
 		return nil
 	}
@@ -353,9 +400,74 @@ func ReceiveFramed(parent context.Context, c Conn, need identity.Need, maxFrame 
 	k.mu.Lock()
 	k.stop = context.AfterFunc(ctx, func() { k.Close() })
 	k.mu.Unlock()
-	fail := func(err error) (*FramedCall, error) { result := frameError(ctx, err); k.Close(); return nil, result }
+	canRefuse := false
+	fail := func(err error) (*FramedCall, error) {
+		result := frameError(ctx, err)
+		if canRefuse && ctx.Err() == nil && errors.Is(result, identity.ErrNotProven) {
+			if refuser, ok := c.(interface{ refuseProof(error) error }); ok {
+				//unchecked: the receiver reports the original proof failure; a failed control write leaves the caller with a transport failure
+				refuser.refuseProof(result)
+			} else {
+				//unchecked: the receiver reports the original proof failure; a failed control write leaves the caller with a transport failure
+				sendProofRefusal(c, result)
+			}
+		}
+		k.Close()
+		return nil, result
+	}
 	if err := ctx.Err(); err != nil {
 		return fail(err)
+	}
+	if receiver, ok := c.(messageReceiver); ok {
+		canRefuse = true
+		message, err := receiver.receiveMessage(ctx, k.limit)
+		keepBinding := false
+		defer func() {
+			if !keepBinding && message.binding != nil {
+				//unchecked: best-effort release of a binding we are discarding on an error path already reported via fail()
+				message.binding.Close()
+			}
+		}()
+		if err != nil {
+			return fail(err)
+		}
+		if uint64(len(message.frame)) > uint64(k.limit) {
+			return fail(ErrFrameTooLarge)
+		}
+		if message.binding == nil {
+			return fail(identity.ErrNoBinding)
+		}
+		if message.reply == nil || message.done == nil {
+			return fail(errMessageLifetime)
+		}
+		if err := message.binding.Check(need); err != nil {
+			return fail(err)
+		}
+		k.mu.Lock()
+		if k.closed {
+			k.mu.Unlock()
+			return fail(context.Canceled)
+		}
+		k.binding = message.binding
+		k.message = &message
+		keepBinding = true
+		k.Caller = SeenBy(message.binding, nil)
+		k.Frame = append([]byte(nil), message.frame...)
+		k.mu.Unlock()
+		select {
+		case <-message.done:
+			return fail(io.ErrClosedPipe)
+		default:
+		}
+		go func() {
+			select {
+			case <-message.done:
+				//unchecked: best-effort teardown triggered by peer completion, no caller left to report a close failure to
+				k.Close()
+			case <-ctx.Done():
+			}
+		}()
+		return k, nil
 	}
 	d, ok := c.(interface{ SetDeadline(time.Time) error })
 	if !ok {
@@ -368,6 +480,7 @@ func ReceiveFramed(parent context.Context, c Conn, need identity.Need, maxFrame 
 	if _, err := io.ReadFull(c, h[:]); err != nil {
 		return fail(err)
 	}
+	canRefuse = true
 	n := binary.BigEndian.Uint32(h[:])
 	if n&sessionFlag != 0 && n != sessionClosing {
 		// A session request to a connection served once: say so, and serve
@@ -401,6 +514,13 @@ func ReceiveFramed(parent context.Context, c Conn, need identity.Need, maxFrame 
 	frame, err := readFrameBody(c, n, k.limit)
 	if err != nil {
 		return fail(err)
+	}
+	// A session may cross its binding-age limit between the final Read and
+	// admission of the decoded frame. Refuse that request before dispatch.
+	if current, ok := c.(interface{ requestValid() error }); ok {
+		if err := current.requestValid(); err != nil {
+			return fail(err)
+		}
 	}
 	if err = ctx.Err(); err != nil {
 		return fail(err)
@@ -442,9 +562,15 @@ func (k *FramedCall) Reply(frame []byte) error {
 			k.replyErr = err
 			return
 		}
-		k.replyErr = writeFrame(k.conn, frame, k.limit)
-		if k.replyErr == nil {
-			k.replyErr = waitFrameEOF(k.conn)
+		if uint64(len(frame)) > uint64(k.limit) {
+			k.replyErr = ErrFrameTooLarge
+		} else if k.message != nil {
+			k.replyErr = k.message.reply(k.ctx, frame)
+		} else {
+			k.replyErr = writeFrame(k.conn, frame, k.limit)
+			if k.replyErr == nil {
+				k.replyErr = waitFrameEOF(k.conn)
+			}
 		}
 		k.replyErr = frameError(k.ctx, k.replyErr)
 	})

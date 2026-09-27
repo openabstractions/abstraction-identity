@@ -45,9 +45,12 @@ class Library:
     def __init__(self, path=None, *, prefix=None):
         if path is None:
             if prefix is None:
-                path = os.environ.get("ABSTRACTION_IPC_LIBRARY")
-                if not path:
-                    prefix = os.environ.get("ABSTRACTION_IPC_PREFIX")
+                from . import _native
+                path = _native.bundled_library_path()
+                if path is None:
+                    path = os.environ.get("ABSTRACTION_IPC_LIBRARY")
+                    if not path:
+                        prefix = os.environ.get("ABSTRACTION_IPC_PREFIX")
             if prefix is not None:
                 prefix = Path(prefix)
                 if not prefix.is_absolute():
@@ -84,6 +87,9 @@ class Library:
             self._open_verified.argtypes = [C.c_char_p,C.c_size_t,C.c_uint32,C.c_void_p,C.POINTER(_Expectation),C.POINTER(C.c_void_p)]
         # Session calls (listen/FRAMING.md "Sessions") are an additive ABI-1 extension.
         self._session_call = getattr(self._dll, "oa_ipc_session_call", None)
+        self._features = getattr(self._dll, "oa_ipc_features", None)
+        if self._features is not None:
+            self._features.restype, self._features.argtypes = C.c_uint32, []
         if self._session_call is not None:
             self._session_call.restype = C.c_int32
             self._session_call.argtypes = [C.c_char_p, C.c_size_t, C.c_uint32, C.c_void_p, C.POINTER(_Expectation),
@@ -166,6 +172,8 @@ class FrameTransport:
     connections are kept for later calls by the shared library's session pool
     (listen/FRAMING.md "Sessions"). Ask for sessions only where the server
     answers or closes an oversized header.
+    Explicit xpc: endpoints always use the shared framed ABI and currently
+    establish a fresh authenticated session for each call.
     """
     def __init__(self, library, endpoint, *, timeout=5.0, deadline=None,
                  cancellation=None, max_frame=1024 * 1024, server=None, sessions=False):
@@ -314,7 +322,12 @@ class FrameTransport:
     def _call(self, frame, reply):
         if not isinstance(frame, bytes) or len(frame) > self.max_frame:
             raise FrameError(INVALID_ARGUMENT, "frame must be bounded bytes")
-        if self.sessions and getattr(self.library, "_session_call", None) is not None:
+        message_endpoint = self.endpoint.startswith(b"xpc:")
+        features = getattr(self.library, "_features", None)
+        if message_endpoint and (features is None or not features() & 1 or
+                                 getattr(self.library, "_session_call", None) is None):
+            raise FrameError(PROOF_UNAVAILABLE, "native message transport unavailable")
+        if (self.sessions or message_endpoint) and getattr(self.library, "_session_call", None) is not None:
             return self._session(frame, reply)
         handle = self._open()
         try:

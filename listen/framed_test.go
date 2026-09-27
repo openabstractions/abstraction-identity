@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -279,32 +280,220 @@ func TestFramedDeadlineAcrossReads(t *testing.T) {
 }
 
 func TestFramedProofRefusal(t *testing.T) {
-	endpoint := framedEndpoint(t)
-	l, err := Listen(endpoint)
-	if err != nil {
-		t.Fatal(err)
+	for _, oneWay := range []bool{false, true} {
+		endpoint := framedEndpoint(t)
+		l, err := Listen(endpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			c, err := l.Accept()
+			if err != nil {
+				done <- err
+				return
+			}
+			k, err := ReceiveFramed(context.Background(), c, identity.Need{User: identity.ProofSigned}, 16)
+			if k != nil {
+				err = errors.New("proof refusal exposed frame")
+			}
+			done <- err
+		}()
+		client := FrameClient{Endpoint: endpoint, Timeout: 2 * time.Second}
+		if oneWay {
+			err = client.WriteFrame(nil)
+		} else {
+			_, err = client.ExchangeFrame(nil)
+		}
+		var refusal *ProofRefusal
+		if !errors.As(err, &refusal) || !errors.Is(err, ErrCallerProofUnmet) || !errors.Is(err, identity.ErrNotProven) ||
+			refusal.Attribute != "user" || refusal.Required != identity.ProofSigned {
+			t.Fatalf("oneWay=%t client refusal=%v", oneWay, err)
+		}
+		err = <-done
+		var proof *identity.ProofError
+		if !errors.As(err, &proof) || proof.Want != identity.ProofSigned {
+			t.Fatalf("expected server proof refusal, got %v", err)
+		}
+		l.Close()
 	}
-	defer l.Close()
+}
+
+type proofDenyFrameConn struct{ net.Conn }
+
+func (c *proofDenyFrameConn) Bind() (*identity.Binding, error) {
+	return nil, &identity.ProofError{Attribute: "code", Want: identity.ProofSigned, Got: identity.ProofNone}
+}
+
+func TestProofRefusalPrecedesBodyRead(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
 	done := make(chan error, 1)
 	go func() {
-		c, err := l.Accept()
-		if err != nil {
-			done <- err
-			return
-		}
-		k, err := ReceiveFramed(context.Background(), c, identity.Need{User: identity.ProofSigned}, 16)
-		if k != nil {
-			err = errors.New("proof refusal exposed frame")
-		}
+		_, err := ReceiveFramed(context.Background(), &proofDenyFrameConn{a}, identity.Need{Code: identity.ProofSigned}, 16)
 		done <- err
 	}()
-	// One-way EOF means submission, including a peer that refuses identity.
-	_ = (FrameClient{Endpoint: endpoint}).WriteFrame(nil)
-	err = <-done
-	var proof *identity.ProofError
-	if !errors.As(err, &proof) || proof.Want != identity.ProofSigned {
-		t.Fatalf("expected proof refusal, got %v", err)
+	// Promise a body but send only the fixed header. The receiver must answer
+	// the proof failure without waiting for or inspecting an application byte.
+	if _, err := b.Write([]byte{0, 0, 0, 5}); err != nil {
+		t.Fatal(err)
 	}
+	var control [6]byte
+	if _, err := io.ReadFull(b, control[:]); err != nil {
+		t.Fatal(err)
+	}
+	if control != [6]byte{0xff, 0xff, 0xff, 0xfe, 5, 8} {
+		t.Fatalf("control=%x", control)
+	}
+	if err := <-done; !errors.Is(err, identity.ErrNotProven) {
+		t.Fatal(err)
+	}
+}
+
+func TestProofRefusalRequiresCompleteValidControl(t *testing.T) {
+	if got := frameLimit(^uint32(0)); got != lengthMask {
+		t.Fatalf("effective frame ceiling=%d, want %d", got, lengthMask)
+	}
+	for _, tc := range []struct {
+		name string
+		wire []byte
+		want error
+	}{
+		{"truncated", []byte{0xff, 0xff, 0xff, 0xfe, 1}, io.ErrUnexpectedEOF},
+		{"bad attribute", []byte{0xff, 0xff, 0xff, 0xfe, 6, 8}, ErrProofRefusalProtocol},
+		{"bad proof", []byte{0xff, 0xff, 0xff, 0xfe, 1, 9}, ErrProofRefusalProtocol},
+		{"old close", nil, io.EOF},
+		{"oversize", []byte{0x40, 0, 0, 0}, ErrFrameTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ReadFrameFrom(bytes.NewReader(tc.wire), ^uint32(0))
+			if !errors.Is(err, tc.want) || errors.Is(err, identity.ErrNotProven) {
+				t.Fatalf("read error=%v, want %v without proof refusal", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestProofRefusalFixedVocabulary(t *testing.T) {
+	for code, attribute := range []string{"", "user", "process", "path", "package", "code"} {
+		if code == 0 {
+			continue
+		}
+		word := proofRefusalBytes(&identity.ProofError{Attribute: attribute, Want: identity.ProofSigned})
+		if word[4] != byte(code) || word[5] != byte(identity.ProofSigned) {
+			t.Fatalf("%s encoded as %x", attribute, word)
+		}
+		err := readProofRefusal(bytes.NewReader(word[4:]))
+		var refusal *ProofRefusal
+		if !errors.As(err, &refusal) || refusal.Attribute != attribute || refusal.Required != identity.ProofSigned {
+			t.Fatalf("%s decoded as %v", attribute, err)
+		}
+	}
+	unknown := proofRefusalBytes(&identity.ProofError{Attribute: "machine-secret", Want: identity.ProofSigned})
+	if unknown[4] != 0 || unknown[5] != 0 {
+		t.Fatalf("unknown attribute disclosed: %x", unknown)
+	}
+}
+
+type failedDirectWriteConn struct {
+	net.Conn
+	response io.Reader
+	writes   int
+	reads    int
+	onWrite  func()
+}
+
+func (c *failedDirectWriteConn) Read(p []byte) (int, error) {
+	c.reads++
+	return c.response.Read(p)
+}
+func (c *failedDirectWriteConn) Write([]byte) (int, error) {
+	c.writes++
+	if c.onWrite != nil {
+		c.onWrite()
+	}
+	return 0, syscall.EPIPE
+}
+func (c *failedDirectWriteConn) SetDeadline(time.Time) error { return nil }
+func (c *failedDirectWriteConn) Close() error                { return nil }
+
+func TestDirectWriteFailureUsesOnlyCompleteProofRefusal(t *testing.T) {
+	marker := proofRefusalBytes(&identity.ProofError{Attribute: "user", Want: identity.ProofSigned})
+	invalid := marker
+	invalid[4] = 0xFF
+	for _, oneWay := range []bool{false, true} {
+		for _, tc := range []struct {
+			name        string
+			response    []byte
+			wantRefusal bool
+		}{
+			{"complete refusal", marker[:], true},
+			{"partial header", marker[:3], false},
+			{"partial tokens", marker[:5], false},
+			{"invalid tokens", invalid[:], false},
+			{"other header", []byte{0, 0, 0, 1}, false},
+			{"EOF", nil, false},
+		} {
+			t.Run(fmt.Sprintf("oneWay=%t/%s", oneWay, tc.name), func(t *testing.T) {
+				conn := &failedDirectWriteConn{response: bytes.NewReader(tc.response)}
+				dials := 0
+				client := FrameClient{Endpoint: "fixture", Timeout: time.Second, Dialer: func(context.Context, string) (net.Conn, error) {
+					dials++
+					return conn, nil
+				}}
+				var err error
+				if oneWay {
+					err = client.WriteFrame([]byte("effect"))
+				} else {
+					_, err = client.ExchangeFrame([]byte("effect"))
+				}
+				var refusal *ProofRefusal
+				if tc.wantRefusal {
+					if !errors.As(err, &refusal) || refusal.Attribute != "user" || refusal.Required != identity.ProofSigned {
+						t.Fatalf("proof refusal = %v", err)
+					}
+				} else if !errors.Is(err, syscall.EPIPE) {
+					t.Fatalf("original write error = %v", err)
+				}
+				if dials != 1 || conn.writes != 1 {
+					t.Fatalf("dials = %d, writes = %d, want one each", dials, conn.writes)
+				}
+			})
+		}
+	}
+}
+
+type readUntilContextDone struct{ ctx context.Context }
+
+func (r readUntilContextDone) Read([]byte) (int, error) {
+	<-r.ctx.Done()
+	return 0, r.ctx.Err()
+}
+
+func TestDirectWriteFailureKeepsContextPriority(t *testing.T) {
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		conn := &failedDirectWriteConn{response: bytes.NewReader(nil), onWrite: cancel}
+		client := FrameClient{Endpoint: "fixture", Dialer: func(context.Context, string) (net.Conn, error) {
+			return conn, nil
+		}}
+		_, err := client.ExchangeFrameContext(ctx, []byte("effect"))
+		if !errors.Is(err, context.Canceled) || conn.reads != 0 {
+			t.Fatalf("canceled write = %v, refusal reads = %d", err, conn.reads)
+		}
+	})
+	t.Run("deadline", func(t *testing.T) {
+		conn := &failedDirectWriteConn{}
+		client := FrameClient{Endpoint: "fixture", Timeout: 25 * time.Millisecond, Dialer: func(ctx context.Context, _ string) (net.Conn, error) {
+			conn.response = readUntilContextDone{ctx: ctx}
+			return conn, nil
+		}}
+		_, err := client.ExchangeFrame([]byte("effect"))
+		if !errors.Is(err, context.DeadlineExceeded) || conn.reads != 1 {
+			t.Fatalf("deadline-bound refusal read = %v, reads = %d", err, conn.reads)
+		}
+	})
 }
 
 type observedFrameConn struct {
@@ -466,7 +655,7 @@ func TestFramedProgramRefusesBelowCeiling(t *testing.T) {
 	if !errors.Is(err, identity.ErrNotProven) {
 		t.Fatalf("expected proof refusal, got %v", err)
 	}
-	if err := <-done; err != nil {
+	if err := <-done; !errors.Is(err, identity.ErrNotProven) {
 		t.Fatal(err)
 	}
 }

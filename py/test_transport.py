@@ -33,6 +33,39 @@ class Native:
 
 
 class TransportTests(unittest.TestCase):
+    def test_message_endpoint_uses_framed_native_boundary(self):
+        calls = []
+        class FramedNative:
+            def _features(self):
+                return 1
+            def _session_call(self, endpoint, length, millis, signal, expected,
+                              frame, size, limit, flags, answer, sent):
+                calls.append((endpoint, frame, flags))
+                return UNTRUSTED
+            def _open_cancelable(self, *args):
+                raise AssertionError("message endpoint reached raw stream")
+        transport = FrameTransport(FramedNative(), "xpc:org.openabstractions.test")
+        for operation in (transport.exchange_frame, transport.write_frame):
+            with self.assertRaises(FrameError) as caught:
+                operation(b"private")
+            self.assertEqual(caught.exception.status, UNTRUSTED)
+        self.assertEqual(calls, [(transport.endpoint, b"private", 0),
+                                 (transport.endpoint, b"private", 1)])
+        with self.assertRaises(FrameError) as caught:
+            FrameTransport(object(), "xpc:org.openabstractions.test").exchange_frame(b"private")
+        self.assertEqual(caught.exception.status, PROOF_UNAVAILABLE)
+
+    def test_old_framed_library_cannot_receive_xpc_payload(self):
+        class OldFramedNative:
+            def _session_call(self, *args):
+                raise AssertionError("XPC payload reached an older socket implementation")
+        for feature_query in (None, lambda: 0):
+            native = OldFramedNative()
+            native._features = feature_query
+            with self.assertRaises(FrameError) as caught:
+                FrameTransport(native, "xpc:org.openabstractions.test").exchange_frame(b"private")
+            self.assertEqual(caught.exception.status, PROOF_UNAVAILABLE)
+
     def test_verified_expectation_is_owned_and_preserved(self):
         server=ServerExpectation(2,"123","/installed/runtime")
         seen=[]

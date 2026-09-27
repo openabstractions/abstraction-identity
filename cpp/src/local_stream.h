@@ -283,6 +283,26 @@ public:
     bool read_some(void* buffer, std::size_t capacity, std::size_t& moved) {
         moved = 0;
         if (!valid()) return false;
+        return read_some_impl(buffer, capacity, moved);
+    }
+    // Only a failed session request write uses this path. It can inspect a
+    // queued fixed refusal without changing the sticky write failure. The
+    // caller destroys this connection after the probe.
+    bool read_after_failed_write(void* buffer, std::size_t capacity, std::size_t& moved) {
+        moved = 0;
+        if (status_ == Status::Timeout || status_ == Status::Cancelled) return false;
+#ifdef _WIN32
+        if (handle_ == INVALID_HANDLE_VALUE) return false;
+#else
+        if (handle_ < 0) return false;
+#endif
+        const auto failed = status_;
+        const bool read = read_some_impl(buffer, capacity, moved);
+        status_ = failed;
+        return read;
+    }
+private:
+    bool read_some_impl(void* buffer, std::size_t capacity, std::size_t& moved) {
         if (!buffer || capacity == 0) { status_ = Status::IoError; return false; }
         for (;;) {
             if (!budget()) return false;
@@ -303,7 +323,6 @@ public:
             return true;
         }
     }
-private:
     bool budget() {
         if (cancellation_ && cancellation_->requested()) {status_=Status::Cancelled;return false;}
         if (detail::remaining_ms(deadline_) > 0) return true;

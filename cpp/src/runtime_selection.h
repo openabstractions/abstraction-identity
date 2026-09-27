@@ -5,6 +5,11 @@
 #include <stdexcept>
 #include <vector>
 #include "runtime_selection_linux.h"
+#ifdef __APPLE__
+#include <pwd.h>
+#include <unistd.h>
+#include "../../xpc_native.h"
+#endif
 #ifdef _WIN32
 #include <msi.h>
 #include <abstraction/ipc/process.hpp>
@@ -21,6 +26,11 @@ inline oa_ipc_status selection_budget(local_stream::Deadline deadline, local_str
     if(local_stream::Clock::now()>=deadline) return OA_IPC_TIMEOUT;
     return OA_IPC_OK;
 }
+}
+
+#include "runtime_selection_darwin.h"
+
+namespace abstraction::ipc_internal {
 
 #ifdef _WIN32
 inline std::string selection_utf8(const std::wstring& value) {
@@ -120,6 +130,19 @@ inline oa_ipc_status select_runtime_identity(RuntimeIdentity& out, local_stream:
     return select_windows_runtime(out,sid,deadline,cancellation,related,property);
 #elif defined(__linux__)
     return select_linux_runtime(out,deadline,cancellation);
+#elif defined(__APPLE__)
+    if(!oa_xpc_available())return OA_IPC_PROOF_UNAVAILABLE;
+    if(::getuid()!=::geteuid())return OA_IPC_UNTRUSTED;
+    const uid_t uid=::geteuid();
+    long capacity=::sysconf(_SC_GETPW_R_SIZE_MAX);
+    if(capacity<1024)capacity=16384;
+    if(capacity>1024*1024)return OA_IPC_UNTRUSTED;
+    std::vector<char> storage(static_cast<std::size_t>(capacity));
+    struct passwd value{},*found=nullptr;
+    if(::getpwuid_r(uid,&value,storage.data(),storage.size(),&found)!=0||!found||!value.pw_dir)
+        return OA_IPC_UNTRUSTED;
+    auto after_lookup=selection_budget(deadline,cancellation);if(after_lookup!=OA_IPC_OK)return after_lookup;
+    return darwin_selection::select(out,deadline,cancellation,uid,value.pw_dir);
 #else
     (void)out;
     return OA_IPC_PROOF_UNAVAILABLE;

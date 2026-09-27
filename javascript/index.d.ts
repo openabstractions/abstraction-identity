@@ -14,6 +14,9 @@ export declare const Status: Readonly<{
 }>;
 export type Status = (typeof Status)[keyof typeof Status];
 
+/** The addon file this connector loads, resolved before any native load. */
+export declare function addonPath(): string;
+
 export declare class FrameError extends Error {
   constructor(status: Status, message: string, transferred?: number);
   status: Status;

@@ -9,6 +9,11 @@ namespace abstraction::ipc {
 // Shared language bootstrap convention. Windows identity comes from the process
 // token; the explicit endpoint override remains an operator choice.
 inline std::string runtime_endpoint() {
+#ifdef __APPLE__
+    // The installed LaunchAgent publishes one fixed bootstrap name. Environment
+    // values remain available to callers that pass an explicit endpoint.
+    return "xpc:com.openabstractions.runtime-v1";
+#else
     if (const char* value = std::getenv("ABSTRACTION_RUNTIME_ENDPOINT")) {
         if (*value) return value;
     }
@@ -22,6 +27,7 @@ inline std::string runtime_endpoint() {
     const char* user = std::getenv("USER");
     return std::string(temporary && *temporary ? temporary : "/tmp") +
         "/openabstractions-runtime-v1-" + (user ? user : "") + ".sock";
+#endif
 #endif
 }
 }

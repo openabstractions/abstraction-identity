@@ -56,14 +56,19 @@ fn main() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         let valid = fields.len() == 3
             && matches!(fields[0], "windows" | "linux" | "macos")
-            && matches!(fields[1], "system" | "cxx-runtime")
+            && matches!(fields[1], "system" | "cxx-runtime" | "framework")
+            && (fields[1] != "framework" || fields[0] == "macos")
             && !fields[2].is_empty()
             && fields[2]
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'+' | b'.' | b'-'));
         assert!(valid, "malformed link-dependencies.txt line {}", index + 1);
         if fields[0] == target {
-            println!("cargo:rustc-link-lib={}", fields[2]);
+            if fields[1] == "framework" {
+                println!("cargo:rustc-link-lib=framework={}", fields[2]);
+            } else {
+                println!("cargo:rustc-link-lib={}", fields[2]);
+            }
         }
     }
 }

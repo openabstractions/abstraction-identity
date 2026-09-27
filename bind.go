@@ -165,6 +165,12 @@ func (b *Binding) Captured() *Peer { return b.peer }
 // BoundAt is when the capture was taken.
 func (b *Binding) BoundAt() time.Time { return b.boundAt }
 
+// EvidenceValidUntil is the expiry of captured time-sensitive evidence.
+// It is zero when this binding captured no evidence with a recorded expiry.
+// On Windows it preserves the original Authenticode verdict deadline even
+// when Bind reused a verdict verified for an earlier connection.
+func (b *Binding) EvidenceValidUntil() time.Time { return b.peer.evidenceValidUntil }
+
 // Check is [Peer.Check] against the re-checked capture.
 func (b *Binding) Check(n Need) error {
 	p, err := b.Peer()

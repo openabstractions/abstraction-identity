@@ -29,17 +29,26 @@ const (
 // DefaultSessionIdle is how long a server session waits for its next request.
 const DefaultSessionIdle = 30 * time.Second
 
+// DefaultSessionMaxAge bounds reuse of a receiver-owned binding. In
+// particular, a Windows code verdict may be stale after five minutes.
+const DefaultSessionMaxAge = 5 * time.Minute
+
 // DefaultMaxSessions bounds the connections one listener holds in session mode.
 const DefaultMaxSessions = 64
 
 // ErrSessionProtocol is a peer breaking the session rules; the connection ends.
 var ErrSessionProtocol = errors.New("listen: session protocol violation")
 
+var errSessionExpired = errors.New("listen: session binding expired")
+
 // SessionOptions bound a session listener. Zero values select the defaults.
 type SessionOptions struct {
 	// Idle is how long a session waits for its next request before the
 	// server retires it with the closing marker.
 	Idle time.Duration
+	// MaxAge is the longest a connection binding can serve new requests.
+	// Zero selects five minutes; larger values are capped at five minutes.
+	MaxAge time.Duration
 	// MaxSessions bounds connections held in session mode, active or idle.
 	// When it is reached an idle session is retired; with none idle, a new
 	// connection is declined and serves one exchange.
@@ -60,6 +69,9 @@ type SessionOptions struct {
 func Sessions(l Listener, opts SessionOptions) Listener {
 	if opts.Idle <= 0 {
 		opts.Idle = DefaultSessionIdle
+	}
+	if opts.MaxAge <= 0 || opts.MaxAge > DefaultSessionMaxAge {
+		opts.MaxAge = DefaultSessionMaxAge
 	}
 	if opts.MaxSessions <= 0 {
 		opts.MaxSessions = DefaultMaxSessions
@@ -99,6 +111,7 @@ func (l *sessionListener) acceptLoop() {
 				l.err = err
 			}
 			l.mu.Unlock()
+			//unchecked: best-effort shutdown after the accept loop's own error is already recorded above
 			l.Close()
 			return
 		}
@@ -109,6 +122,7 @@ func (l *sessionListener) acceptLoop() {
 		}
 		l.mu.Unlock()
 		if full {
+			//unchecked: best-effort close of a connection refused for being over the waiting cap
 			c.Close()
 			continue
 		}
@@ -150,12 +164,20 @@ func (l *sessionListener) deliver(c Conn) bool {
 	case l.calls <- c:
 		return true
 	case <-l.done:
+		//unchecked: best-effort close of a connection that cannot be delivered because the listener is already closed
 		c.Close()
 		return false
 	}
 }
 
 func (l *sessionListener) serve(c Conn) {
+	if _, ok := c.(messageReceiver); ok {
+		l.mu.Lock()
+		l.waiting--
+		l.mu.Unlock()
+		l.deliver(c)
+		return
+	}
 	header, pc, ok := l.firstHeader(c)
 	l.mu.Lock()
 	l.waiting--
@@ -186,9 +208,11 @@ func (l *sessionListener) serve(c Conn) {
 	if !admitted {
 		// Declined: one exchange, served as a single-exchange connection.
 		if err := writeUint32(pc, sessionDecline); err != nil {
+			//unchecked: best-effort cleanup on an error path that already returns after this write failure
 			pc.Close()
 			return
 		}
+		//unchecked: SetDeadline's only failure mode is an already-broken connection, which the delivered replayConn's own Read/Write will surface
 		pc.SetDeadline(time.Time{})
 		var plain [4]byte
 		binary.BigEndian.PutUint32(plain[:], header&lengthMask)
@@ -209,25 +233,30 @@ func (l *sessionListener) firstHeader(c Conn) (uint32, deadlineConn, bool) {
 	}
 	var h [4]byte
 	if err := pc.SetDeadline(time.Now().Add(l.opts.FirstRequest)); err != nil {
+		//unchecked: best-effort cleanup on an error path that already returns after this SetDeadline failure
 		pc.Close()
 		return 0, nil, false
 	}
 	if _, err := io.ReadFull(pc, h[:1]); err != nil {
+		//unchecked: best-effort cleanup on an error path that already returns after this read failure
 		pc.Close()
 		return 0, nil, false
 	}
 	if h[0]&0x80 == 0 {
 		// Not a session: this connection is served exactly as before.
+		//unchecked: SetDeadline's only failure mode is an already-broken connection, which the delivered replayConn's own Read/Write will surface
 		pc.SetDeadline(time.Time{})
 		l.deliver(&replayConn{deadlineConn: pc, prefix: []byte{h[0]}})
 		return 0, nil, false
 	}
 	if _, err := io.ReadFull(pc, h[1:]); err != nil {
+		//unchecked: best-effort cleanup on an error path that already returns after this read failure
 		pc.Close()
 		return 0, nil, false
 	}
 	header := binary.BigEndian.Uint32(h[:])
 	if header == sessionClosing {
+		//unchecked: best-effort cleanup on a path that already returns after the peer's closing marker
 		pc.Close()
 		return 0, nil, false
 	}
@@ -258,9 +287,22 @@ type session struct {
 	pc       deadlineConn
 	binding  *identity.Binding
 	bindErr  error
+	expires  time.Time
 	mu       sync.Mutex
 	idle     bool
 	retiring bool
+}
+
+func (s *session) expired() bool {
+	return !s.expires.IsZero() && !time.Now().Before(s.expires)
+}
+
+func sessionDeadline(boundAt time.Time, maxAge time.Duration, evidenceUntil time.Time) time.Time {
+	deadline := boundAt.Add(maxAge)
+	if !evidenceUntil.IsZero() && evidenceUntil.Before(deadline) {
+		deadline = evidenceUntil
+	}
+	return deadline
 }
 
 // retire asks an idle session to end with the closing marker, or an active one
@@ -270,6 +312,7 @@ func (s *session) retire() bool {
 	defer s.mu.Unlock()
 	s.retiring = true
 	if s.idle {
+		//unchecked: best-effort interrupt of a blocked idle read; a failure here means the connection is already broken and the read has already returned
 		s.pc.SetReadDeadline(time.Now())
 		return true
 	}
@@ -279,6 +322,9 @@ func (s *session) retire() bool {
 func (s *session) isRetiring() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.expired() {
+		s.retiring = true
+	}
 	return s.retiring
 }
 
@@ -288,14 +334,22 @@ func (s *session) run(header uint32) {
 		delete(s.l.sessions, s)
 		s.l.mu.Unlock()
 		if s.binding != nil {
+			//unchecked: best-effort release in a deferred teardown with no caller left to report a close failure to
 			s.binding.Close()
 		}
+		//unchecked: best-effort close in a deferred teardown with no caller left to report a close failure to
 		s.pc.Close()
 	}()
 	if err := writeUint32(s.pc, sessionAccept); err != nil {
 		return
 	}
 	s.binding, s.bindErr = s.pc.Bind()
+	boundAt, evidenceUntil := time.Now(), time.Time{}
+	if s.binding != nil {
+		boundAt = s.binding.BoundAt()
+		evidenceUntil = s.binding.EvidenceValidUntil()
+	}
+	s.expires = sessionDeadline(boundAt, s.l.opts.MaxAge, evidenceUntil)
 	for {
 		if header&sessionFlag == 0 || header == sessionClosing {
 			return
@@ -310,15 +364,29 @@ func (s *session) run(header uint32) {
 			return
 		}
 		s.mu.Lock()
+		if s.expired() {
+			s.retiring = true
+		}
 		if s.retiring {
 			s.mu.Unlock()
 			// The client was told it may send again; tell it not to.
+			//unchecked: this run() goroutine returns unconditionally next regardless of the deadline/write outcome, so checking would not change behavior
 			s.pc.SetDeadline(time.Now().Add(DefaultFrameTimeout))
+			//unchecked: best-effort closing-marker write; the return below is unconditional either way, and a failed write leaves the deferred pc.Close() to end the connection
 			writeUint32(s.pc, sessionClosing)
 			return
 		}
 		s.idle = true
-		s.pc.SetDeadline(time.Now().Add(s.l.opts.Idle))
+		deadline := time.Now().Add(s.l.opts.Idle)
+		if s.expires.Before(deadline) {
+			deadline = s.expires
+		}
+		if err := s.pc.SetDeadline(deadline); err != nil {
+			s.idle = false
+			s.retiring = true
+			s.mu.Unlock()
+			return
+		}
 		s.mu.Unlock()
 		next, ok := s.nextHeader()
 		if !ok {
@@ -336,13 +404,15 @@ func (s *session) nextHeader() (uint32, bool) {
 	n, err := io.ReadFull(s.pc, h[:])
 	s.mu.Lock()
 	s.idle = false
-	retiring := s.retiring
+	retiring := s.retiring || s.expired()
 	s.mu.Unlock()
 	if retiring {
 		if n == 0 {
 			// Nothing of a next request was read, so the marker tells the
 			// client it is safe to repeat on another connection.
+			//unchecked: the return below is unconditional either way, so checking the deadline/write outcome would not change behavior
 			s.pc.SetDeadline(time.Now().Add(DefaultFrameTimeout))
+			//unchecked: best-effort closing-marker write; the return below is unconditional either way, and a failed write leaves the deferred pc.Close() to end the connection
 			writeUint32(s.pc, sessionClosing)
 		}
 		return 0, false
@@ -350,7 +420,9 @@ func (s *session) nextHeader() (uint32, bool) {
 	if n == 0 {
 		if os.IsTimeout(err) {
 			// A natural idle timeout with no next request retires the session.
+			//unchecked: the return below is unconditional either way, so checking the deadline/write outcome would not change behavior
 			s.pc.SetDeadline(time.Now().Add(DefaultFrameTimeout))
+			//unchecked: best-effort closing-marker write; the return below is unconditional either way, and a failed write leaves the deferred pc.Close() to end the connection
 			writeUint32(s.pc, sessionClosing)
 		}
 		return 0, false
@@ -361,11 +433,16 @@ func (s *session) nextHeader() (uint32, bool) {
 		}
 		// A request that began before a natural idle timeout is completed and
 		// served. Explicit retirement was handled above.
+		//unchecked: a failure here means the connection is already broken, which the following io.ReadFull already checks and reports
 		s.pc.SetDeadline(time.Now().Add(s.l.opts.FirstRequest))
 		if _, err := io.ReadFull(s.pc, h[n:]); err != nil {
 			return 0, false
 		}
 	}
+	if s.expired() {
+		return 0, false
+	}
+	//unchecked: SetDeadline's only failure mode is an already-broken connection, which the delivered session's own checked Read/Write will surface
 	s.pc.SetDeadline(time.Time{})
 	return binary.BigEndian.Uint32(h[:]), true
 }
@@ -397,7 +474,29 @@ type sessionCall struct {
 	done      chan struct{}
 }
 
+func (c *sessionCall) refuseProof(err error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return net.ErrClosed
+	}
+	// Bypass sessionCall.Write, which rejects one-way replies and would
+	// translate an ordinary response header into a continuing session.
+	c.broken = true
+	return sendProofRefusal(c.s.pc, err)
+}
+
+func (c *sessionCall) requestValid() error {
+	if c.s.expired() {
+		return errSessionExpired
+	}
+	return nil
+}
+
 func (c *sessionCall) Bind() (*identity.Binding, error) {
+	if err := c.requestValid(); err != nil {
+		return nil, err
+	}
 	if c.s.bindErr != nil {
 		return nil, c.s.bindErr
 	}
@@ -420,11 +519,21 @@ func (c *sessionCall) Read(p []byte) (int, error) {
 		c.mu.Unlock()
 		return 0, net.ErrClosed
 	case c.headerAt < len(c.header):
+		if c.s.expired() {
+			c.broken = true
+			c.mu.Unlock()
+			return 0, errSessionExpired
+		}
 		n := copy(p, c.header[c.headerAt:])
 		c.headerAt += n
 		c.mu.Unlock()
 		return n, nil
 	case c.remaining > 0:
+		if c.s.expired() {
+			c.broken = true
+			c.mu.Unlock()
+			return 0, errSessionExpired
+		}
 		if uint64(len(p)) > uint64(c.remaining) {
 			p = p[:c.remaining]
 		}
@@ -436,6 +545,7 @@ func (c *sessionCall) Read(p []byte) (int, error) {
 		// for the client to hang up, as on a single-exchange connection.
 		p = p[:min(len(p), 1)]
 	}
+	readingRequest := c.remaining > 0
 	c.reading++
 	c.mu.Unlock()
 	n, err := c.s.pc.Read(p)
@@ -444,6 +554,10 @@ func (c *sessionCall) Read(p []byte) (int, error) {
 	c.reading--
 	if c.readDone != nil {
 		c.readDone.Broadcast()
+	}
+	if readingRequest && c.s.expired() {
+		c.broken = true
+		return 0, errSessionExpired
 	}
 	if c.remaining > 0 {
 		c.remaining -= uint32(n)
@@ -533,6 +647,7 @@ func (c *sessionCall) Close() error {
 		// A read waiting for the client to hang up must end before the
 		// session reads its next request.
 		c.readDone = sync.NewCond(&c.mu)
+		//unchecked: best-effort interrupt of a blocked read; a failure here means the connection is already broken and the read has already returned
 		c.s.pc.SetReadDeadline(time.Now())
 		for c.reading > 0 {
 			c.readDone.Wait()

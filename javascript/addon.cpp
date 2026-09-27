@@ -82,7 +82,10 @@ void execute(napi_env,void* p){
     auto left=w.deadline-Clock::now();
     if(left<=Clock::duration::zero()){w.status=OA_IPC_TIMEOUT;return;}
     auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(left).count();
-    if(w.sessions){
+    if(w.endpoint.compare(0,4,"xpc:")==0 && !(oa_ipc_features() & OA_IPC_FEATURE_XPC)){
+      w.status=OA_IPC_PROOF_UNAVAILABLE;return;
+    }
+    if(w.sessions || w.endpoint.compare(0,4,"xpc:")==0){
       // One call through the shared library's session pool (FRAMING.md "Sessions").
       const oa_ipc_server_expectation expected{sizeof(oa_ipc_server_expectation),1,w.principal_kind,0,
         w.principal.data(),w.principal.size(),w.program.data(),w.program.size()};

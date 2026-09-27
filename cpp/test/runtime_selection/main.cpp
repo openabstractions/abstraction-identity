@@ -1,10 +1,12 @@
 #include <abstraction/ipc/client.h>
+#include <abstraction/ipc/bootstrap.hpp>
 #include "../../src/runtime_selection.h"
 #include <iostream>
 #include <stdexcept>
 
 void require(bool condition,const char* message) { if(!condition)throw std::runtime_error(message); }
 #include "linux.h"
+#include "darwin.h"
 
 int main(int argc,char** argv) { try {
 #ifdef __linux__
@@ -58,6 +60,10 @@ int main(int argc,char** argv) { try {
     require(::MsiEnumRelatedProductsW(L"{00000000-0000-0000-0000-000000000001}",0,0,product)==ERROR_NO_MORE_ITEMS,"MSI read-only probe");
 #elif defined(__linux__)
     linux_tests();
+#elif defined(__APPLE__)
+    darwin_tests();
+    ::setenv("ABSTRACTION_RUNTIME_ENDPOINT", "xpc:untrusted-environment", 1);
+    require(abstraction::ipc::runtime_endpoint()=="xpc:com.openabstractions.runtime-v1","fixed Darwin endpoint");
 #else
     require(oa_ipc_select_runtime(1000,nullptr,&selected)==OA_IPC_PROOF_UNAVAILABLE && selected==nullptr,"unsupported selection");
 #endif

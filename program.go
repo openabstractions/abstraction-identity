@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -88,6 +89,40 @@ var canonicalProgramPath = func(path string) string { return path }
 // refused before.
 func CanonicalProgramPath(path string) string {
 	return canonicalProgramPath(path)
+}
+
+// NormalizeSubjectProgram gives an ordinary image path the spelling used for
+// caller subjects. MSIX package identities retain their stable family name.
+// Validation remains the caller's responsibility; an unresolvable path keeps
+// its cleaned spelling and does not prove that a file exists.
+func NormalizeSubjectProgram(program string) string {
+	if strings.HasPrefix(program, PackagedProgramPrefix) {
+		return program
+	}
+	return CanonicalProgramPath(filepath.Clean(program))
+}
+
+// SameSubjectProgram compares two subject program names. Invalid or relative
+// input never matches, even when both inputs have the same spelling.
+func SameSubjectProgram(a, b string) bool {
+	if !comparableSubjectProgram(a) || !comparableSubjectProgram(b) {
+		return false
+	}
+	a, b = NormalizeSubjectProgram(a), NormalizeSubjectProgram(b)
+	if !ValidSubjectProgram(a) || !ValidSubjectProgram(b) {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func comparableSubjectProgram(program string) bool {
+	if strings.HasPrefix(program, PackagedProgramPrefix) {
+		return ValidSubjectProgram(program)
+	}
+	return len(program) > 0 && len(program) <= 4096 && filepath.IsAbs(program) && !strings.ContainsAny(program, "\x00\r\n")
 }
 
 // ValidSubjectProgram reports whether program is a subject program as

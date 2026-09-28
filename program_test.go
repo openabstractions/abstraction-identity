@@ -1,9 +1,36 @@
 package identity
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+func TestSubjectProgramComparisonPreservesIdentityBoundaries(t *testing.T) {
+	one := filepath.Join(t.TempDir(), "one.exe")
+	two := filepath.Join(t.TempDir(), "one.exe")
+	if !SameSubjectProgram(one, one) || SameSubjectProgram(one, two) {
+		t.Fatal("path comparison lost file identity")
+	}
+	unclean := filepath.Dir(one) + string(os.PathSeparator) + "child" + string(os.PathSeparator) + ".." + string(os.PathSeparator) + filepath.Base(one)
+	if got := NormalizeSubjectProgram(unclean); got != one || !SameSubjectProgram(unclean, one) {
+		t.Fatalf("cleaned subject %q did not match %q", got, one)
+	}
+	if runtime.GOOS != "windows" && SameSubjectProgram(strings.ToUpper(one), one) {
+		t.Fatal("non-Windows subject comparison folded case")
+	}
+	const packageProgram = "msix:Claude_pzs8sxrjxfjjc"
+	if got := NormalizeSubjectProgram(packageProgram); got != packageProgram || !SameSubjectProgram(packageProgram, packageProgram) {
+		t.Fatalf("package identity was changed or refused: %q", got)
+	}
+	for _, bad := range []string{"", "relative.exe", "msix:bad", one + "\n", one + "\x00"} {
+		if SameSubjectProgram(bad, bad) || SameSubjectProgram(bad, one) {
+			t.Fatalf("invalid subject %q matched", bad)
+		}
+	}
+}
 
 // A package full name yields its family, which survives a version change; a
 // malformed name yields nothing.

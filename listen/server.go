@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -57,20 +56,7 @@ func (e ServerExpectation) check(b *identity.Binding) error {
 	if u.Kind != e.Principal.Kind || u.Kind == "windows" && u.SID != e.Principal.SID || u.Kind == "posix" && u.UID != e.Principal.UID {
 		return errors.New("server principal mismatch")
 	}
-	match := filepath.Clean(path) == filepath.Clean(e.Program)
-	if runtime.GOOS == "windows" {
-		// The peer's image path is whatever spelling the kernel recorded when
-		// the process was created: a short DOS 8.3 alias when it was launched
-		// that way. The expectation is ordinarily typed or resolved as a long
-		// path. Canonicalizing both to the OS's own long spelling before
-		// folding case makes either spelling of the same file match, and
-		// keeps a different file from matching.
-		match = strings.EqualFold(
-			identity.CanonicalProgramPath(filepath.Clean(path)),
-			identity.CanonicalProgramPath(filepath.Clean(e.Program)),
-		)
-	}
-	if !match {
+	if !identity.SameSubjectProgram(path, e.Program) {
 		return errors.New("server program mismatch")
 	}
 	if e.Process != nil && (process.PID != e.Process.PID || !process.StartTime.Equal(e.Process.StartTime)) {

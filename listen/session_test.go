@@ -104,6 +104,247 @@ func echo(k *FramedCall) error {
 	return k.Reply(k.Frame)
 }
 
+type heldAcceptListener struct {
+	entered chan struct{}
+	closed  chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (l *heldAcceptListener) Accept() (Conn, error) {
+	l.once.Do(func() { close(l.entered) })
+	<-l.release
+	return nil, net.ErrClosed
+}
+
+func (l *heldAcceptListener) Close() error {
+	close(l.closed)
+	return nil
+}
+
+func TestSessionCloseWaitsForAcceptToReleaseItsHandle(t *testing.T) {
+	inner := &heldAcceptListener{entered: make(chan struct{}), closed: make(chan struct{}), release: make(chan struct{})}
+	l := Sessions(inner, SessionOptions{})
+	<-inner.entered
+	closed := make(chan error, 1)
+	go func() { closed <- l.Close() }()
+	<-inner.closed
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before Accept released its handle: %v", err)
+	default:
+	}
+	close(inner.release)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not finish after Accept released its handle")
+	}
+}
+
+func TestSessionCloseLetsActiveCallFinishAndDrainsItsTransport(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	s := serveSessions(t, SessionOptions{}, framingNeed, func(k *FramedCall) error {
+		close(entered)
+		<-release
+		return k.Reply(k.Frame)
+	})
+	client := FrameClient{Endpoint: s.endpoint, Timeout: 2 * time.Second, Sessions: true}
+	response := make(chan error, 1)
+	go func() {
+		_, err := client.ExchangeFrame([]byte("active"))
+		response <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("active call was not delivered")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- s.l.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("listener Close waited for the active handler")
+	}
+	close(release)
+	select {
+	case err := <-response:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("active call did not finish")
+	}
+	s.wg.Wait()
+	l := s.l.(*sessionListener)
+	l.mu.Lock()
+	remaining := len(l.sessions)
+	l.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("host worker finished while %d session transport remained open", remaining)
+	}
+	again, err := Listen(s.endpoint)
+	if err != nil {
+		t.Fatalf("the endpoint could not be rebound after its worker finished: %v", err)
+	}
+	again.Close()
+}
+
+type queuedSessionListener struct {
+	conn   Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (l *queuedSessionListener) Accept() (Conn, error) {
+	if l.conn != nil {
+		c := l.conn
+		l.conn = nil
+		return c, nil
+	}
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *queuedSessionListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+type gatedSessionConn struct {
+	net.Conn
+	closing chan struct{}
+	release chan struct{}
+}
+
+func (c *gatedSessionConn) Bind() (*identity.Binding, error) { return nil, nil }
+func (c *gatedSessionConn) Close() error {
+	close(c.closing)
+	<-c.release
+	return c.Conn.Close()
+}
+
+func TestSessionCloseDrainsAnUndeliveredCall(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close()
+	conn := &gatedSessionConn{Conn: server, closing: make(chan struct{}), release: make(chan struct{})}
+	inner := &queuedSessionListener{conn: conn, closed: make(chan struct{})}
+	l := Sessions(inner, SessionOptions{}).(*sessionListener)
+	opened := make(chan error, 1)
+	go func() {
+		if err := writeUint32(client, sessionFlag); err != nil {
+			opened <- err
+			return
+		}
+		ack, _, err := readUint32(client)
+		if err == nil && ack != sessionAccept {
+			err = fmt.Errorf("session answer %#x", ack)
+		}
+		opened <- err
+	}()
+	if err := <-opened; err != nil {
+		t.Fatal(err)
+	}
+	// The session has answered its opening header and is waiting to hand its
+	// first call to Accept. There is deliberately no Accept caller.
+	closed := make(chan error, 1)
+	go func() { closed <- l.Close() }()
+	select {
+	case <-conn.closing:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the undelivered session did not begin closing")
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before the undelivered pipe was closed: %v", err)
+	default:
+	}
+	close(conn.release)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not finish after the pipe closed")
+	}
+}
+
+func TestSessionCloseLeavesDeliveredPlainConnectionWithItsCaller(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close()
+	conn := &gatedSessionConn{Conn: server, closing: make(chan struct{}), release: make(chan struct{})}
+	inner := &queuedSessionListener{conn: conn, closed: make(chan struct{})}
+	l := Sessions(inner, SessionOptions{})
+	go client.Write([]byte{0})
+	owned, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- l.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		close(conn.release)
+		t.Fatal("Close waited on a connection already delivered to the caller")
+	}
+	select {
+	case <-conn.closing:
+		t.Fatal("Close interrupted a connection already delivered to the caller")
+	default:
+	}
+	close(conn.release)
+	if err := owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPendingSessionConnectionOwnershipTransfer(t *testing.T) {
+	for _, releaseFirst := range []bool{true, false} {
+		server, client := net.Pipe()
+		conn := &gatedSessionConn{Conn: server, closing: make(chan struct{}), release: make(chan struct{})}
+		close(conn.release)
+		p := &pendingSessionConn{conn: conn, owned: true}
+		if releaseFirst {
+			if !p.release() {
+				t.Fatal("live connection was not released to the caller")
+			}
+			p.interrupt()
+			select {
+			case <-conn.closing:
+				t.Fatal("shutdown closed caller-owned connection")
+			default:
+			}
+			conn.Close()
+		} else {
+			p.interrupt()
+			if p.release() {
+				t.Fatal("closed connection was released to the caller")
+			}
+			select {
+			case <-conn.closing:
+			default:
+				t.Fatal("shutdown did not close its pending connection")
+			}
+		}
+		client.Close()
+	}
+}
+
 func TestFreshSessionCallerProofRefusalIsTerminal(t *testing.T) {
 	for _, oneWay := range []bool{false, true} {
 		s := serveSessions(t, SessionOptions{}, identity.Need{User: identity.ProofSigned}, echo)

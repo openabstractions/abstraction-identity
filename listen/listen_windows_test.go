@@ -28,3 +28,42 @@ func TestAPipeNameBelongsToTheFirstListener(t *testing.T) {
 	}
 	again.Close()
 }
+
+func TestPipeNameCanBeReboundWhileOldClientHandleRemainsOpen(t *testing.T) {
+	name := fmt.Sprintf(`\\.\pipe\rebind-held-client-%d-%s`, os.Getpid(), t.Name())
+	first, err := Listen(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := make(chan Conn, 1)
+	go func() {
+		server, err := first.Accept()
+		if err != nil {
+			accepted <- nil
+			return
+		}
+		accepted <- server
+	}()
+	client, err := Dial(name)
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server := <-accepted
+	if server == nil {
+		first.Close()
+		t.Fatal("the first listener did not accept the client")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Listen(name)
+	if err != nil {
+		t.Fatalf("the old client's still-open handle holds the name: %v", err)
+	}
+	again.Close()
+}

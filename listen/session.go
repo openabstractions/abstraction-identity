@@ -79,7 +79,7 @@ func Sessions(l Listener, opts SessionOptions) Listener {
 	if opts.FirstRequest <= 0 {
 		opts.FirstRequest = DefaultFrameTimeout
 	}
-	s := &sessionListener{inner: l, opts: opts, calls: make(chan Conn), done: make(chan struct{}), sessions: map[*session]struct{}{}}
+	s := &sessionListener{inner: l, opts: opts, calls: make(chan Conn), done: make(chan struct{}), acceptDone: make(chan struct{}), pending: map[*pendingSessionConn]struct{}{}, sessions: map[*session]struct{}{}}
 	go s.acceptLoop()
 	return s
 }
@@ -91,18 +91,51 @@ type deadlineConn interface {
 }
 
 type sessionListener struct {
-	inner    Listener
-	opts     SessionOptions
-	calls    chan Conn
-	done     chan struct{}
-	once     sync.Once
-	mu       sync.Mutex
-	err      error
-	waiting  int
-	sessions map[*session]struct{}
+	inner      Listener
+	opts       SessionOptions
+	calls      chan Conn
+	done       chan struct{}
+	acceptDone chan struct{}
+	once       sync.Once
+	mu         sync.Mutex
+	err        error
+	waiting    int
+	pending    map[*pendingSessionConn]struct{}
+	sessions   map[*session]struct{}
+}
+
+type pendingSessionConn struct {
+	conn   Conn
+	done   chan struct{}
+	mu     sync.Mutex
+	owned  bool
+	closed bool
+}
+
+func (p *pendingSessionConn) release() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	p.owned = false
+	return true
+}
+
+func (p *pendingSessionConn) interrupt() {
+	p.mu.Lock()
+	if !p.owned || p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	p.mu.Unlock()
+	//unchecked: best-effort interrupt of a first-header read after shutdown
+	p.conn.Close()
 }
 
 func (l *sessionListener) acceptLoop() {
+	defer close(l.acceptDone)
 	for {
 		c, err := l.inner.Accept()
 		if err != nil {
@@ -112,21 +145,30 @@ func (l *sessionListener) acceptLoop() {
 			}
 			l.mu.Unlock()
 			//unchecked: best-effort shutdown after the accept loop's own error is already recorded above
-			l.Close()
+			l.shutdown()
 			return
 		}
 		l.mu.Lock()
+		select {
+		case <-l.done:
+			l.mu.Unlock()
+			//unchecked: best-effort close of a connection accepted during shutdown
+			c.Close()
+			return
+		default:
+		}
 		full := l.waiting >= 2*l.opts.MaxSessions
 		if !full {
 			l.waiting++
-		}
-		l.mu.Unlock()
-		if full {
-			//unchecked: best-effort close of a connection refused for being over the waiting cap
-			c.Close()
+			p := &pendingSessionConn{conn: c, done: make(chan struct{}), owned: true}
+			l.pending[p] = struct{}{}
+			l.mu.Unlock()
+			go l.serve(p)
 			continue
 		}
-		go l.serve(c)
+		l.mu.Unlock()
+		//unchecked: best-effort close of a connection refused for being over the waiting cap
+		c.Close()
 	}
 }
 
@@ -145,15 +187,67 @@ func (l *sessionListener) Accept() (Conn, error) {
 }
 
 func (l *sessionListener) Close() error {
+	err := l.shutdown()
+	<-l.acceptDone
+	l.mu.Lock()
+	pending := make([]*pendingSessionConn, 0, len(l.pending))
+	for p := range l.pending {
+		pending = append(pending, p)
+	}
+	l.mu.Unlock()
+	for _, p := range pending {
+		<-p.done
+	}
+	l.mu.Lock()
+	sessions := make([]*session, 0, len(l.sessions))
+	for s := range l.sessions {
+		sessions = append(sessions, s)
+	}
+	l.mu.Unlock()
+	for _, s := range sessions {
+		s.mu.Lock()
+		handoff := s.handoffDone
+		s.mu.Unlock()
+		if handoff != nil {
+			<-handoff
+		}
+		s.mu.Lock()
+		active := s.active
+		completed := false
+		if active {
+			select {
+			case <-s.callDone:
+				completed = true
+			default:
+			}
+		}
+		s.mu.Unlock()
+		if !active || completed {
+			<-s.done
+		}
+	}
+	return err
+}
+
+// shutdown starts teardown without waiting. The accept loop uses it on its own
+// error; public Close waits for the resources it owns to finish releasing.
+func (l *sessionListener) shutdown() error {
 	var err error
 	l.once.Do(func() {
 		close(l.done)
 		err = l.inner.Close()
 		l.mu.Lock()
+		pending := make([]*pendingSessionConn, 0, len(l.pending))
+		for p := range l.pending {
+			pending = append(pending, p)
+		}
 		for s := range l.sessions {
 			s.retire()
 		}
 		l.mu.Unlock()
+		for _, p := range pending {
+			p.interrupt()
+		}
 	})
 	return err
 }
@@ -161,31 +255,58 @@ func (l *sessionListener) Close() error {
 // deliver hands one Conn to Accept, or closes it once the listener is closed.
 func (l *sessionListener) deliver(c Conn) bool {
 	select {
+	case <-l.done:
+		if _, active := c.(*sessionCall); !active {
+			//unchecked: best-effort close of a connection after listener shutdown
+			c.Close()
+		}
+		return false
+	default:
+	}
+	select {
 	case l.calls <- c:
 		return true
 	case <-l.done:
-		//unchecked: best-effort close of a connection that cannot be delivered because the listener is already closed
-		c.Close()
+		if _, active := c.(*sessionCall); !active {
+			//unchecked: best-effort close of a connection that cannot be delivered because the listener is already closed
+			c.Close()
+		}
 		return false
 	}
 }
 
-func (l *sessionListener) serve(c Conn) {
+func (l *sessionListener) serve(p *pendingSessionConn) {
+	s, header := l.prepare(p)
+	if s != nil {
+		s.run(header)
+	}
+}
+
+func (l *sessionListener) prepare(p *pendingSessionConn) (*session, uint32) {
+	defer func() {
+		l.mu.Lock()
+		delete(l.pending, p)
+		l.mu.Unlock()
+		close(p.done)
+	}()
+	c := p.conn
 	if _, ok := c.(messageReceiver); ok {
 		l.mu.Lock()
 		l.waiting--
 		l.mu.Unlock()
-		l.deliver(c)
-		return
+		if p.release() {
+			l.deliver(c)
+		}
+		return nil, 0
 	}
-	header, pc, ok := l.firstHeader(c)
+	header, pc, ok := l.firstHeader(p)
 	l.mu.Lock()
 	l.waiting--
 	l.mu.Unlock()
 	if !ok {
-		return
+		return nil, 0
 	}
-	s := &session{l: l, pc: pc}
+	s := &session{l: l, pc: pc, done: make(chan struct{})}
 	l.mu.Lock()
 	admitted := len(l.sessions) < l.opts.MaxSessions
 	if !admitted {
@@ -210,25 +331,31 @@ func (l *sessionListener) serve(c Conn) {
 		if err := writeUint32(pc, sessionDecline); err != nil {
 			//unchecked: best-effort cleanup on an error path that already returns after this write failure
 			pc.Close()
-			return
+			return nil, 0
 		}
 		//unchecked: SetDeadline's only failure mode is an already-broken connection, which the delivered replayConn's own Read/Write will surface
 		pc.SetDeadline(time.Time{})
 		var plain [4]byte
 		binary.BigEndian.PutUint32(plain[:], header&lengthMask)
-		l.deliver(&replayConn{deadlineConn: pc, prefix: plain[:]})
-		return
+		if p.release() {
+			l.deliver(&replayConn{deadlineConn: pc, prefix: plain[:]})
+		}
+		return nil, 0
 	}
-	s.run(header)
+	p.release()
+	return s, header
 }
 
 // firstHeader reads a new connection's first session header. A connection that
 // does not open a session is delivered unchanged and reported not ok, as is
 // one that failed or closed.
-func (l *sessionListener) firstHeader(c Conn) (uint32, deadlineConn, bool) {
+func (l *sessionListener) firstHeader(p *pendingSessionConn) (uint32, deadlineConn, bool) {
+	c := p.conn
 	pc, ok := c.(deadlineConn)
 	if !ok {
-		l.deliver(c)
+		if p.release() {
+			l.deliver(c)
+		}
 		return 0, nil, false
 	}
 	var h [4]byte
@@ -246,7 +373,9 @@ func (l *sessionListener) firstHeader(c Conn) (uint32, deadlineConn, bool) {
 		// Not a session: this connection is served exactly as before.
 		//unchecked: SetDeadline's only failure mode is an already-broken connection, which the delivered replayConn's own Read/Write will surface
 		pc.SetDeadline(time.Time{})
-		l.deliver(&replayConn{deadlineConn: pc, prefix: []byte{h[0]}})
+		if p.release() {
+			l.deliver(&replayConn{deadlineConn: pc, prefix: []byte{h[0]}})
+		}
 		return 0, nil, false
 	}
 	if _, err := io.ReadFull(pc, h[1:]); err != nil {
@@ -283,14 +412,18 @@ func (c *replayConn) Read(p []byte) (int, error) {
 }
 
 type session struct {
-	l        *sessionListener
-	pc       deadlineConn
-	binding  *identity.Binding
-	bindErr  error
-	expires  time.Time
-	mu       sync.Mutex
-	idle     bool
-	retiring bool
+	l           *sessionListener
+	pc          deadlineConn
+	binding     *identity.Binding
+	bindErr     error
+	expires     time.Time
+	mu          sync.Mutex
+	idle        bool
+	active      bool
+	callDone    chan struct{}
+	handoffDone chan struct{}
+	retiring    bool
+	done        chan struct{}
 }
 
 func (s *session) expired() bool {
@@ -330,15 +463,18 @@ func (s *session) isRetiring() bool {
 
 func (s *session) run(header uint32) {
 	defer func() {
-		s.l.mu.Lock()
-		delete(s.l.sessions, s)
-		s.l.mu.Unlock()
 		if s.binding != nil {
 			//unchecked: best-effort release in a deferred teardown with no caller left to report a close failure to
 			s.binding.Close()
 		}
 		//unchecked: best-effort close in a deferred teardown with no caller left to report a close failure to
 		s.pc.Close()
+		s.l.mu.Lock()
+		delete(s.l.sessions, s)
+		s.l.mu.Unlock()
+		if s.done != nil {
+			close(s.done)
+		}
 	}()
 	if err := writeUint32(s.pc, sessionAccept); err != nil {
 		return
@@ -356,10 +492,33 @@ func (s *session) run(header uint32) {
 		}
 		call := &sessionCall{s: s, remaining: header & lengthMask, oneWay: header&oneWayFlag != 0, done: make(chan struct{})}
 		binary.BigEndian.PutUint32(call.header[:], header&lengthMask)
-		if !s.l.deliver(call) {
+		handoff := make(chan struct{})
+		s.l.mu.Lock()
+		select {
+		case <-s.l.done:
+			s.l.mu.Unlock()
+			return
+		default:
+		}
+		s.mu.Lock()
+		s.callDone = call.done
+		s.handoffDone = handoff
+		s.mu.Unlock()
+		s.l.mu.Unlock()
+		delivered := s.l.deliver(call)
+		s.mu.Lock()
+		s.active = delivered
+		s.handoffDone = nil
+		s.mu.Unlock()
+		close(handoff)
+		if !delivered {
 			return
 		}
 		<-call.done
+		s.mu.Lock()
+		s.active = false
+		s.callDone = nil
+		s.mu.Unlock()
 		if call.broken || !call.continued {
 			return
 		}
@@ -640,6 +799,7 @@ func (c *sessionCall) Close() error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
+		c.waitForShutdown()
 		return nil
 	}
 	c.closed = true
@@ -673,5 +833,14 @@ func (c *sessionCall) Close() error {
 	}
 	c.mu.Unlock()
 	close(c.done)
+	c.waitForShutdown()
 	return nil
+}
+
+func (c *sessionCall) waitForShutdown() {
+	select {
+	case <-c.s.l.done:
+		<-c.s.done
+	default:
+	}
 }

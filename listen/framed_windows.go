@@ -35,7 +35,9 @@ func dialPipeContext(ctx context.Context, name string, legacy bool) (net.Conn, e
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		h, err := windows.CreateFile(n, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, identifyOnly|windows.FILE_FLAG_OVERLAPPED, 0)
+		// Individual client data rights omit FILE_CREATE_PIPE_INSTANCE, which
+		// GENERIC_WRITE would implicitly request on a named pipe.
+		h, err := windows.CreateFile(n, windows.FILE_GENERIC_READ|(windows.FILE_GENERIC_WRITE&^windows.FILE_APPEND_DATA), windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, identifyOnly|windows.FILE_FLAG_OVERLAPPED, 0)
 		if err == nil {
 			if ctx.Err() != nil {
 				windows.CloseHandle(h)

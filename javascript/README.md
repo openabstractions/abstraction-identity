@@ -1,5 +1,7 @@
 # Shared Node client transport
 
+*For transport and client-library authors writing JavaScript.*
+
 This page is for whoever builds or embeds an OA client transport in Node or
 Bun, or a generated JavaScript service client on top of it. An application
 calling a capability resolves a typed client through the facade instead.
@@ -50,6 +52,22 @@ returns the installed runtime's identity from the shared C ABI selector, on a
 libuv worker under the same waiting rules. It connects to nothing. No or an
 ambiguous installation rejects with `Status.Untrusted`; a platform without the
 facilities rejects with `Status.ProofUnavailable`. Pass the result as `server`.
+
+`@openabstractions/ipc/path` exports `within(path, folder)`. Both arguments are
+absolute paths and `folder` must already exist. It follows links at the deepest
+existing folder above `path` and compares directory identity, not folded path
+names. Windows uses the package's native identity addon and compares volume
+serial numbers and file IDs; Linux and macOS compare the filesystem identity
+reported by `stat`. A missing path is contained only when an existing ancestor
+resolves to `folder` by file identity. Windows refuses UNC, device, NT object,
+mapped-drive and reserved-device paths before opening them. A local reparse
+point is opened for identity with identification-level security; if its final
+path is off-local, that path is refused for every later identity open. Missing
+components are resolved through their deepest existing parent; dangling links
+and other filesystem errors reject the promise. The answer records containment
+at check time; a later concurrent path change can affect the subsequent write.
+Extended `\\?\X:\` drive paths retain their spelling through identity opens,
+including literal trailing dots and spaces in path components.
 
 `new FrameTransport(endpoint, {timeout:5000, deadline:null, cancellation:null})`
 uses milliseconds and a monotonic `performance.now()` deadline. Defaults receive

@@ -72,11 +72,11 @@ func processExe(pid int) (string, bool, error) {
 // processStartTime converts field 22 of /proc/<pid>/stat - the process start
 // time, in clock ticks since boot - into a wall clock instant.
 //
-// The conversion is approximate and cannot be made otherwise: /proc/uptime is
-// read afterwards rather than atomically with the stat file, its resolution is
-// 10ms, and the tick rate is an ABI constant taken from the auxiliary vector.
-// Callers must use the result only to refuse, never to promote a proof. See
-// startTimeSlop.
+// /proc/stat's btime is a stable boot epoch shared by processes. Using it
+// instead of sampling /proc/uptime gives the same process generation the same
+// timestamp across separate bindings. btime has one-second precision and
+// starttime is quantized to USER_HZ; callers retain startTimeSlop when
+// comparing this timestamp with a connection's wall-clock time.
 func processStartTime(pid int) (time.Time, error) {
 	stat, err := os.ReadFile("/proc/" + itoa(pid) + "/stat")
 	if err != nil {
@@ -101,29 +101,34 @@ func processStartTime(pid int) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	up, err := uptime()
+	boot, err := bootEpoch()
 	if err != nil {
 		return time.Time{}, err
 	}
-	age := up - time.Duration(float64(ticks)/float64(clockTicks())*float64(time.Second))
-	return time.Now().Add(-age), nil
+	hz := clockTicks()
+	seconds := ticks / hz
+	nanos := (ticks % hz) * int64(time.Second) / hz
+	return time.Unix(boot.Unix()+seconds, nanos), nil
 }
 
-func uptime() (time.Duration, error) {
-	b, err := os.ReadFile("/proc/uptime")
+var bootEpoch = sync.OnceValues(func() (time.Time, error) {
+	b, err := os.ReadFile("/proc/stat")
 	if err != nil {
-		return 0, err
+		return time.Time{}, err
 	}
-	fields := strings.Fields(string(b))
-	if len(fields) == 0 {
-		return 0, errors.New("/proc/uptime is empty")
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "btime" {
+			continue
+		}
+		seconds, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("/proc/stat btime: %w", err)
+		}
+		return time.Unix(seconds, 0), nil
 	}
-	secs, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return 0, err
-	}
-	return time.Duration(secs * float64(time.Second)), nil
-}
+	return time.Time{}, errors.New("/proc/stat has no btime")
+})
 
 // clockTicks is USER_HZ: the unit /proc/<pid>/stat counts in. It is 100 on
 // every architecture this package is likely to run on, but it is an ABI

@@ -10,8 +10,9 @@
 // can ask [CanEver] at startup whether the policy it intends to enforce is
 // achievable on this operating system at all.
 //
-// Nothing here ever reads an identity out of a message. There is no API that
-// accepts one. [ProofClaimed] exists only to name what is being refused.
+// Nothing here reads caller-supplied identity fields out of a payload. Native
+// stream credentials and, on macOS, the exact XPC message's OS evidence identify
+// the caller. [ProofClaimed] exists only to name what is being refused.
 //
 // # Usage
 //
@@ -20,25 +21,35 @@
 //	    return fmt.Errorf("this build cannot enforce its own permission model: %w", err)
 //	}
 //
-//	for {
-//	    h := acceptPipeInstance()
-//	    at := time.Now() // the line after accept; see Options.ConnectedAt
+//	func serveOne(h identity.Handle, at time.Time) error {
+//	    defer closeAcceptedPipe(h)
 //
 //	    // Windows will not identify the peer until the server has read.
-//	    frame := readOneBoundedFrame(h) // do not parse it yet
+//	    frame, err := readOneBoundedFrame(h) // do not parse it yet
+//	    if err != nil { return err }
 //
-//	    peer, err := identity.OfHandle(identity.Handle(h), &identity.Options{ConnectedAt: at})
-//	    if err != nil { reject(h); continue }
-//	    if err := peer.Check(policy); err != nil { reject(h); continue }
+//	    b, err := identity.Bind(h, &identity.Options{ConnectedAt: at})
+//	    if err != nil { return err }
+//	    defer b.Close() // release evidence before the accepted pipe closes
+//	    if err := b.Check(policy); err != nil { return err }
+//	    peer, err := b.Peer() // recheck the captured binding before acting
+//	    if err != nil { return err }
 //
-//	    handle(peer, frame) // now the bytes may be interpreted, as a request
-//	}                       // and never as a claim about who is making it
+//	    return handle(peer, frame)
+//	}
+//
+// Capture at on the line after accept; see [Options.ConnectedAt]. The service
+// supplies policy and the pipe/frame helpers above. [Binding] owns evidence and
+// must be closed; [OfHandle] and [OfConn] return snapshots for diagnostics, with
+// no later recheck. The listen subpackage provides framed admission and keeps
+// the binding alive through each call, including XPC requests.
 //
 // # Platforms
 //
-// Windows named pipes, Linux AF_UNIX and macOS AF_UNIX are implemented. Every
-// other GOOS is a seam that returns [ErrUnimplemented] rather than a weaker
-// answer from a portable fallback.
+// Windows named pipes, Linux AF_UNIX, macOS AF_UNIX and macOS XPC are implemented.
+// XPC requires cgo and macOS 12 or newer. [Ceiling] describes the native stream;
+// [CeilingFor] selects a transport. Every other GOOS is a seam that returns
+// [ErrUnimplemented] rather than a weaker answer from a portable fallback.
 //
 // The three do not answer the same question equally well, and the differences
 // are not details:
@@ -51,7 +62,9 @@
 //   - macOS can verify a running program's signature, which neither of the
 //     others can, but over a plain socket the audit token that selects which
 //     program is resolved from the socket's current owner rather than stamped
-//     at connect - so the strong answer is bound to a weak binding.
+//     at connect, capping process-derived evidence at [ProofPID]. Its XPC path
+//     instead binds an active request to the exact message's validated code and
+//     remote connection, with a bound path; Package and Code remain unknown.
 //
 // Read CONTRACT.md before building a permission prompt on any of it. It is the
 // document this package exists to make possible.

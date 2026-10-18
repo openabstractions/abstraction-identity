@@ -75,9 +75,9 @@ inline constexpr bool operator!=(std::string_view name, Proof value) { return wi
 
 inline const std::vector<std::string> kProofNames = {"none", "claimed", "invalid", "unsigned", "unmet", "pid", "bound", "kernel", "signed"};
 
-inline const std::vector<std::string> kNativeOperations = {"OfHandle", "OfConn", "CanEver", "Check", "Get", "AtLeast"};
+inline const std::vector<std::string> kNativeOperations = {"OfHandle", "OfConn", "Bind", "BindConn", "BindXPCRequest", "Ceiling", "CeilingFor", "CanEver", "Check", "Get", "AtLeast", "Binding.Peer", "Binding.Check", "Binding.Alive", "Binding.Captured", "Binding.BoundAt", "Binding.EvidenceValidUntil", "Binding.Shared", "Binding.Close"};
 
-inline const std::vector<std::string> kNativeBindingTypes = {"Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options"};
+inline const std::vector<std::string> kNativeBindingTypes = {"Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options", "Binding", "Need", "Limits", "Transport", "XPCRequest"};
 
 // Minimum proof for each native Peer attribute. Policy comparison uses the
 // declared native order. A serialized requirement or proof name never supplies

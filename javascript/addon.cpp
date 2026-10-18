@@ -1,5 +1,8 @@
 #include <node_api.h>
 #include <abstraction/ipc/client.h>
+#ifdef _WIN32
+#include "path_identity_windows.h"
+#endif
 #include <atomic>
 #include <algorithm>
 #include <chrono>
@@ -268,6 +271,67 @@ napi_value select_runtime(napi_env env,napi_callback_info info){
     if(counted)active.fetch_sub(1);return fail(env,"invalid or over-capacity runtime selection");
   }
 }
+#ifdef _WIN32
+std::wstring path_argument(napi_env env,napi_value value){
+  napi_valuetype type;checked(napi_typeof(env,value,&type));
+  if(type!=napi_string)throw napi_invalid_arg;
+  size_t length=0;checked(napi_get_value_string_utf16(env,value,nullptr,0,&length));
+  if(length>32767)throw napi_invalid_arg;
+  std::vector<char16_t> buffer(length+1);size_t copied=0;
+  checked(napi_get_value_string_utf16(env,value,buffer.data(),buffer.size(),&copied));
+  std::wstring result;result.reserve(copied);
+  for(size_t i=0;i<copied;++i)result.push_back(static_cast<wchar_t>(buffer[i]));
+  return result;
+}
+const char* path_error_code(DWORD code){
+  switch(code){
+    case ERROR_FILE_NOT_FOUND:case ERROR_PATH_NOT_FOUND:case ERROR_INVALID_DRIVE:return "ENOENT";
+    case ERROR_ACCESS_DENIED:case ERROR_PRIVILEGE_NOT_HELD:return "EACCES";
+    case ERROR_SHARING_VIOLATION:case ERROR_LOCK_VIOLATION:return "EBUSY";
+    case ERROR_INVALID_NAME:case ERROR_INVALID_PARAMETER:return "EINVAL";
+    default:return "ERR_PATH_IDENTITY";
+  }
+}
+std::wstring path_error_message(const oa_identity_path::Failure& error){
+  if(error.kind==oa_identity_path::FailureKind::not_local)
+    return L"identity: path is not on a local drive";
+  if(error.kind==oa_identity_path::FailureKind::invalid_argument)
+    return L"identity: invalid path argument";
+  std::wstring message=L"identity: "+error.operation+L" "+error.path+L" failed with Windows error "+std::to_wstring(error.code);
+  wchar_t system_message[512]{};
+  const DWORD size=::FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,nullptr,error.code,0,
+      system_message,static_cast<DWORD>(std::size(system_message)),nullptr);
+  if(size){
+    std::wstring detail(system_message,size);
+    while(!detail.empty()&&(detail.back()==L'\r'||detail.back()==L'\n'||detail.back()==L' '))detail.pop_back();
+    if(!detail.empty())message+=L": "+detail;
+  }
+  return message;
+}
+napi_value throw_path_failure(napi_env env,const oa_identity_path::Failure& error){
+  const auto message=path_error_message(error);
+  napi_value text,result,code,win32;
+  if(napi_create_string_utf16(env,reinterpret_cast<const char16_t*>(message.data()),message.size(),&text)!=napi_ok||
+      napi_create_error(env,nullptr,text,&result)!=napi_ok)return fail(env,"path identity failed");
+  const char* code_text=error.kind==oa_identity_path::FailureKind::not_local?"ERR_NOT_LOCAL_PATH":
+      error.kind==oa_identity_path::FailureKind::invalid_argument?"ERR_INVALID_ARG_TYPE":path_error_code(error.code);
+  if(napi_create_string_utf8(env,code_text,NAPI_AUTO_LENGTH,&code)==napi_ok)
+    napi_set_named_property(env,result,"code",code);
+  if(error.kind==oa_identity_path::FailureKind::system&&napi_create_uint32(env,error.code,&win32)==napi_ok)
+    napi_set_named_property(env,result,"win32Code",win32);
+  napi_throw(env,result);return nullptr;
+}
+napi_value within_path(napi_env env,napi_callback_info info){
+  try{
+    size_t n=2;napi_value args[2];checked(napi_get_cb_info(env,info,&n,args,nullptr,nullptr));
+    if(n!=2)throw napi_invalid_arg;
+    const auto path=path_argument(env,args[0]);
+    const auto folder=path_argument(env,args[1]);
+    napi_value result;checked(napi_get_boolean(env,oa_identity_path::within(path,folder),&result));return result;
+  }catch(const oa_identity_path::Failure& error){return throw_path_failure(env,error);}
+  catch(...){return fail(env,"invalid path containment arguments or native path failure");}
+}
+#endif
 napi_value init(napi_env env,napi_value exports){
   if(oa_ipc_version()!=1)return fail(env,"unsupported IPC ABI version");
   napi_property_descriptor methods[]={
@@ -275,8 +339,12 @@ napi_value init(napi_env env,napi_value exports){
     {"createCancellation",nullptr,create_signal,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"cancel",nullptr,cancel,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"runtimeEndpoint",nullptr,bootstrap,nullptr,nullptr,nullptr,napi_default,nullptr},
-    {"selectRuntime",nullptr,select_runtime,nullptr,nullptr,nullptr,napi_default,nullptr}};
-  if(napi_define_properties(env,exports,5,methods)!=napi_ok)return nullptr;return exports;
+    {"selectRuntime",nullptr,select_runtime,nullptr,nullptr,nullptr,napi_default,nullptr},
+#ifdef _WIN32
+    {"withinPath",nullptr,within_path,nullptr,nullptr,nullptr,napi_default,nullptr},
+#endif
+  };
+  if(napi_define_properties(env,exports,sizeof(methods)/sizeof(methods[0]),methods)!=napi_ok)return nullptr;return exports;
 }
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME,init)

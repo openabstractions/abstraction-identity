@@ -108,10 +108,10 @@ func withPeerToken(pipe windows.Handle, fn func(windows.Token) error) error {
 // name and not the identity.
 func peerUser(pipe windows.Handle) (User, string, error) {
 	var (
-		sid          *windows.SID
-		elevated     bool
-		level        uint32
-		integrityRID uint32
+		sid      *windows.SID
+		elevated bool
+		level    uint32
+		label    tokenLabel
 	)
 	err := withPeerToken(pipe, func(tok windows.Token) error {
 		var n uint32
@@ -137,7 +137,7 @@ func peerUser(pipe windows.Handle) (User, string, error) {
 			return fmt.Errorf("identity: copy SID: %w", err)
 		}
 		elevated = tok.IsElevated()
-		integrityRID = tokenIntegrityRID(tok)
+		label = readTokenLabel(tok)
 		return nil
 	})
 	if err != nil {
@@ -146,14 +146,14 @@ func peerUser(pipe windows.Handle) (User, string, error) {
 
 	user := User{
 		Kind: "windows", SID: sid.String(), Elevated: elevated,
-		Integrity: integrityName(integrityRID), IntegrityRID: integrityRID,
+		Integrity: label.integrity, IntegrityRID: label.rid, Restricted: label.restricted,
 		UID: -1, GID: -1,
 	}
-	why := ""
+	why := label.why
 	if name, domain, err := accountName(sid); err == nil {
 		user.Name, user.Domain = name, domain
 	} else {
-		why = "the SID has no resolvable account name (" + err.Error() + "); the SID itself is unaffected"
+		why = joinWhy(why, "the SID has no resolvable account name ("+err.Error()+"); the SID itself is unaffected")
 	}
 	if level == windows.SecurityIdentification {
 		why = joinWhy(why, "the client granted SECURITY_IDENTIFICATION, which is the level this identity is read at")
@@ -161,12 +161,42 @@ func peerUser(pipe windows.Handle) (User, string, error) {
 	return user, why, nil
 }
 
-// tokenIntegrityRID reads the mandatory label off the peer's token. A failure
-// costs a display detail, not the identity, so it returns 0 rather than an
-// error.
-func tokenIntegrityRID(tok windows.Token) uint32 {
-	rid, _ := integrity.RID(tok)
-	return rid
+// tokenLabel is what a token says about the authority of its holder beyond
+// its account: the mandatory integrity level and whether it is restricted.
+type tokenLabel struct {
+	integrity  string
+	rid        uint32
+	known      bool
+	restricted bool
+	why        string
+}
+
+// labelRID and tokenRestricted read a token's label and restricted flag;
+// tests replace them.
+var (
+	labelRID        = integrity.RID
+	tokenRestricted = func(tok windows.Token) (bool, error) { return tok.IsRestricted() }
+)
+
+// readTokenLabel reads the mandatory label and the restricted flag off a
+// token. An unreadable label is reported as Integrity "unknown" with RID 0,
+// never as a level, and an unreadable restricted flag as restricted, so a
+// caller that compares authority refuses rather than assumes (ID-S1).
+func readTokenLabel(tok windows.Token) tokenLabel {
+	label := tokenLabel{integrity: "unknown"}
+	if rid, ok := labelRID(tok); ok {
+		label.integrity, label.rid, label.known = integrityName(rid), rid, true
+	} else {
+		label.why = "the token's integrity label could not be read"
+	}
+	restricted, err := tokenRestricted(tok)
+	if err != nil {
+		label.restricted = true
+		label.why = joinWhy(label.why, "the token's restricted flag could not be read ("+err.Error()+"), so it is reported restricted")
+	} else {
+		label.restricted = restricted
+	}
+	return label
 }
 
 // Mandatory integrity levels, as RIDs of the label SID.
@@ -178,10 +208,10 @@ const (
 	integritySystem    = 0x4000
 )
 
+// integrityName names a label RID that was read; RID 0 is the untrusted
+// level, and an unread label is "unknown" (readTokenLabel).
 func integrityName(rid uint32) string {
 	switch {
-	case rid == 0:
-		return ""
 	case rid >= integritySystem:
 		return "system"
 	case rid >= integrityHigh:

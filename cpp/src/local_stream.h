@@ -101,6 +101,9 @@ inline bool overlapped_io(Fn&& fn, HANDLE handle, void* buffer, DWORD bytes, Dea
 // look dead precisely when it is busiest.
 inline HANDLE open_pipe(const std::string& path, Deadline deadline, Cancellation* cancellation) {
     const std::wstring wide(path.begin(), path.end());  // the name is hex ASCII
+    // Client data rights only: GENERIC_WRITE also requests
+    // FILE_CREATE_PIPE_INSTANCE on named pipes.
+    const DWORD client_access = FILE_GENERIC_READ | (FILE_GENERIC_WRITE & ~FILE_APPEND_DATA);
     const DWORD flags =
         FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
     if (cancellation) {
@@ -108,7 +111,7 @@ inline HANDLE open_pipe(const std::string& path, Deadline deadline, Cancellation
             if (cancellation->requested()) { ::SetLastError(ERROR_OPERATION_ABORTED); return INVALID_HANDLE_VALUE; }
             const int left = remaining_ms(deadline);
             if (left <= 0) { ::SetLastError(ERROR_TIMEOUT); return INVALID_HANDLE_VALUE; }
-            HANDLE h = ::CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+            HANDLE h = ::CreateFileW(wide.c_str(), client_access, 0, nullptr,
                                      OPEN_EXISTING, flags, nullptr);
             if (h != INVALID_HANDLE_VALUE) return h;
             if (::GetLastError() != ERROR_PIPE_BUSY) return INVALID_HANDLE_VALUE;
@@ -119,7 +122,7 @@ inline HANDLE open_pipe(const std::string& path, Deadline deadline, Cancellation
         }
     }
     for (int attempt = 0; attempt < 2; ++attempt) {
-        const HANDLE h = ::CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+        const HANDLE h = ::CreateFileW(wide.c_str(), client_access, 0, nullptr,
                                        OPEN_EXISTING, flags, nullptr);
         if (h != INVALID_HANDLE_VALUE) return h;
         if (::GetLastError() != ERROR_PIPE_BUSY || attempt == 1) return INVALID_HANDLE_VALUE;

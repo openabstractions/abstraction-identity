@@ -34,6 +34,15 @@ type unixListener struct {
 	lock *os.File
 }
 
+// ListenAdmitting is Listen for a pipe that also admits AppContainers
+// (ID-K1). No platform but Windows has them, so naming one is refused.
+func ListenAdmitting(path string, containers ...string) (Listener, error) {
+	if len(containers) > 0 {
+		return nil, errors.New("listen: AppContainers exist only on Windows")
+	}
+	return Listen(path)
+}
+
 // The endpoint belongs to whoever holds the lock beside it, never to whoever
 // unlinked last. Removing the socket before binding, which is what this did,
 // lets a second start detach a healthy first listener from its address, and a
@@ -116,6 +125,11 @@ func (l *unixListener) Close() error {
 func Dial(path string) (net.Conn, error) { return net.Dial("unix", path) }
 
 func Endpoint(service string) string {
+	// Providers launched by the runtime receive the resolved socket address.
+	// Preserve it when an older provider entrypoint calls Endpoint again.
+	if filepath.IsAbs(service) {
+		return service
+	}
 	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
 		return d + "/openabstractions-" + service + ".sock"
 	}

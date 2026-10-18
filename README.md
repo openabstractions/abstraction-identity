@@ -1,29 +1,20 @@
 # abstraction-identity
 
-## For application developers
+*For provider authors and service authors. Applications read
+[For application developers](#for-application-developers).*
 
-An application does not call this layer. OA's capability services — asks,
-rights, credentials, logging and the rest — call it at their own receiving
-boundary, to verify who connected before reading a request. The platform
-table under [Today](#today) shows the proof available on each transport.
-Current source provides Program proof over macOS XPC; the macOS Unix-socket
-and loopback paths still refuse calls requiring that proof.
+abstraction-identity tells a local service which program and which account is
+on the other end of a connection.
+
+Windows named pipes, Linux Unix sockets with `SO_PEERPIDFD`, and macOS XPC
+provide the account, process and executable evidence required by
+`listen.Program`. macOS Unix sockets have a lower process/path ceiling.
+Every fact carries the proof level the transport and build supplied.
 
 Let a local service verify which account and executable connected before it
 reads a protected request. Each fact records how strongly the operating system
 proved it. A service that needs executable-level proof receives no identity when
 the platform can prove only the user or process.
-
-The shared native IPC transport composes this package before parsing a
-capability request. Applications normally consume the resulting authorization
-and attribution through capability clients. Service and transport authors use
-`Peer`, `Proof`, `CanEver` and the native listener directly.
-
-**In development.** Windows named pipes, Linux Unix sockets and macOS XPC provide
-the Program evidence used by current protected service tests. The macOS Unix
-socket path remains below that policy and fails closed. The XPC implementation
-described here is current source behavior; the published 0.2.0 package predates
-it.
 
 ## The problem
 
@@ -44,6 +35,22 @@ kernel wrote onto the pipe. What is missing is not the syscall — it is a way t
 say how much each part of the answer is worth, so that a service needing a
 verified signature can find out it cannot have one instead of quietly accepting
 something weaker.
+
+The example is in [Using it](#using-it).
+
+The shared native IPC transport composes this package before parsing a
+capability request. Applications normally consume the resulting authorization
+and attribution through capability clients. Service and transport authors use
+`Peer`, `Proof`, `CanEver` and the native listener directly.
+
+## For application developers
+
+An application does not call this layer. OA's capability services — asks,
+rights, credentials, logging and the rest — call it at their own receiving
+boundary, to verify who connected before reading a request. The platform
+table under [Today](#today) shows the proof available on each transport.
+Current source provides Program proof over macOS XPC; the macOS Unix-socket
+and loopback paths still refuse calls requiring that proof.
 
 ## Words
 
@@ -72,13 +79,28 @@ Install the runtime first: https://openabstractions.org/adopt.html
 - **Go.** `go get github.com/openabstractions/abstraction-identity`. The module
   is at the repository root. One dependency, `golang.org/x/sys`. Releases use
   root-level `vX.Y.Z` tags; pin a release by adding `@vX.Y.Z` to the module path.
-- **Other languages.** See generated protocol and shared transport/client packages
-  in this repository and the facade. Native provider support is separate.
+- **Other languages.** C++, Python, Rust and Node have shared capability-client
+  transports in this repository. Bun supports the stream paths and refuses XPC.
+  Generated identity proof vocabulary is committed for Go, C++ and Python.
+  These clients reach a receiving service that derives the caller's identity;
+  the language wrappers do not expose equivalent native `Peer`/`Binding`
+  receiving-host APIs. The supported high-level receiver is Go's `listen/`.
+  Client transport qualification and receiving-host support are separate.
+
+The definition's `native_operations` and `native_binding_types` are descriptive
+names for the core Go API. They generate common vocabulary, not native receiver
+implementations in each language. `BindXPCRequest` and `XPCRequest` are exported
+only in Darwin cgo builds; `CeilingFor` reports whether a selected transport is
+available on this build and platform.
 
 ## What it does
 
 ```go
-peer, err := identity.OfHandle(identity.Handle(h), &identity.Options{ConnectedAt: at})
+b, err := identity.Bind(identity.Handle(h), &identity.Options{ConnectedAt: at})
+if err != nil { return err }
+defer b.Close() // before the accepted connection is closed
+peer, err := b.Peer() // rechecks the capture; use b.Check(policy) for a policy
+if err != nil { return err }
 ```
 
 `peer` carries five attributes — user, process, path, package, code — and every
@@ -116,42 +138,63 @@ if err := identity.CanEver(policy); err != nil {
 }
 ```
 
-`CanEver` compares a policy against what the running platform can prove at best.
+`CanEver` compares a policy against the default native stream transport's ceiling.
+For a framed endpoint use `listen.CanEver(endpoint, policy)` or
+`listen.ListenFramed(endpoint, policy)`; they select XPC for `xpc:` endpoints.
 A policy demanding a `signed` code identity fails on all three, for three
 different reasons — Authenticode verifies a file rather than a running image;
 macOS verifies the running image but a socket cannot bind it to the peer; Linux
-has no signature to verify. On Linux it also fails if the kernel is older than
+has no signature to verify. Current XPC also leaves `Code` and `Package` unknown:
+structural code validity supplies no trusted publisher policy. On Linux it
+also fails if the kernel is older than
 6.5 and the policy wants a `bound` path, because without `SO_PEERPIDFD` there is
 nothing to pin the pid. Better to fail to start than to discover that once per
 connection and be tempted to relax it.
 
 ## Using it
 
+Use the existing framed listener for a receiving service. It owns the
+platform-specific capture timing and closes the binding with the call:
+
 ```go
-// Windows will not identify the peer until the server has read from the pipe.
-// This is not optional and there is no way round it; see CONTRACT.md.
-h := acceptPipeInstance()
-at := time.Now()                 // the line after accept
-frame := readOneBoundedFrame(h)  // do not parse it yet
-
-peer, err := identity.OfHandle(identity.Handle(h), &identity.Options{ConnectedAt: at})
-if err != nil { reject(h); return }
-if err := peer.Check(policy); err != nil { reject(h); return }
-
-handle(peer, frame) // now the bytes are a request, and never a claim about
-                    // who is making it
+l, err := listen.ListenFramed(endpoint, listen.Program)
+if err != nil { return err } // refuses an impossible endpoint policy at startup
+defer l.Close()
+c, err := l.Accept()
+if err != nil { return err }
+defer c.Close() // also covers errors before ReceiveFramed takes ownership
+call, err := listen.ReceiveFramed(ctx, c, listen.Program, listen.DefaultMaxFrame)
+if err != nil { return err } // no capability frame exposed without checked proof
+defer call.Close()
+peer, err := call.Peer() // recheck before using the capture for an effect
+if err != nil { return err }
+return handle(peer, call.Frame) // application handler; never use payload identity
 ```
 
-On Unix the same loop is shorter, because the credentials are on the socket at
-`accept` and no read is needed first:
+The imports are `github.com/openabstractions/abstraction-identity` and its
+`listen` subpackage. `endpoint`, `ctx` and `handle` belong to the service.
+`listen.Program` requires kernel user/process and bound path evidence. It
+refuses macOS Unix sockets and Linux kernels without `SO_PEERPIDFD` at startup.
+On macOS use a launchd-registered `xpc:service-name` with a cgo build. A
+different explicitly chosen policy can admit weaker evidence; the listener
+does not silently lower it. `call.WaitContext()` tracks the caller's waiting
+lifetime. Accepted durable work keeps its own service-owned lifetime.
+
+For a custom stream transport, keep the accepted connection open and close
+the binding first. On Windows read one bounded frame before `Bind`, then check
+the binding before parsing that frame. On Unix bind on the line after accept,
+before reading any bytes:
 
 ```go
 c, err := listener.AcceptUnix()
 at := time.Now()                 // the line after accept
 
-peer, err := identity.OfConn(c, &identity.Options{ConnectedAt: at})
-if err != nil { c.Close(); return }
-if err := peer.Check(policy); err != nil { c.Close(); return }
+if err != nil { return err }
+defer c.Close()
+b, err := identity.BindConn(c, &identity.Options{ConnectedAt: at})
+if err != nil { return err }
+defer b.Close() // runs before c.Close
+if err := b.Check(policy); err != nil { return err }
 ```
 
 `Options.ConnectedAt` is worth setting on every platform, and on macOS it is
@@ -169,17 +212,25 @@ afterwards rather than re-deriving.
 
 ```go
 b, err := identity.BindConn(c, &identity.Options{ConnectedAt: at}) // on the line after accept
+if err != nil { return err }
 defer b.Close()
-if err := b.Check(policy); err != nil { reject(c); return }       // ErrPeerMoved, not a stale answer
+if err := b.Check(policy); err != nil { return err } // ErrPeerMoved, not a stale answer
 ```
 
 `Bind` returns `ErrNoBinding` on a machine that has no primitive for it — a
 Linux kernel below 6.5 — rather than degrading to a lookup. `Ceiling().Bindable`
 says so before a connection exists, so a service can refuse to start.
 
-A peer that merely exits stays bound: "the process that opened this connection
-was X" stays true after X is gone, and every primitive here pins the process
-so no successor can take its place. `Binding.Alive` is the separate question.
+`Binding.Peer` and `Binding.Check` recheck; `Captured` is a diagnostic snapshot
+for logs and tests. Closing the owning binding makes subsequent rechecks return
+`net.ErrClosed`. `Shared` views use that same owner and their `Close` releases
+nothing. Keep views finished before closing the owner. On stream bindings,
+peer exit can leave the captured identity valid; `Alive` asks about liveness
+separately. Darwin Unix capture still has the ceiling below. XPC bindings belong
+to one active request and become unusable when that request completes or closes.
+
+`OfHandle` and `OfConn` are one-time lookup diagnostics. They retain no binding
+to recheck later and should not replace this lifecycle in authorization code.
 
 ## Today
 
@@ -207,12 +258,14 @@ Measured twice on 15.7.4; see `bind_attack_darwin_test.go`.
 Current source also provides launchd-registered `xpc:service-name` endpoints.
 Each request is bound to the exact XPC message before its frame reaches a
 handler. The measured implementation supplies `kernel` user and process evidence
-and a `bound` executable path, satisfying `listen.Program`. It validates the
+when the exact message's remote-connection process path agrees with its validated
+message code, and a `bound` executable path, satisfying `listen.Program`. It validates the
 message sender's code structurally, while `Package` and `Code` remain unknown
 because ad-hoc validity establishes no trusted publisher. Client bootstrap
 checks an independently selected runtime executable and user before sending a
 capability frame. The client APIs used here require macOS 12 or newer; execution
-evidence is from macOS 26.6.2 arm64.
+evidence is from macOS 26.6.2 arm64. `identity.CeilingFor(identity.TransportXPC)`
+reports this transport; plain `Ceiling()` continues to describe Unix sockets.
 
 Linux is the mirror image: unforgeable answers about *who* — uid, gid, and the
 LSM profile from `SO_PEERSEC` — and no general answer at all about *what*.
@@ -234,15 +287,24 @@ permission system built on this must therefore refuse to promise.
 
 ## Conformance
 
-All three platforms are covered by tests in this repository, run on Windows 11,
-Linux 6.18 and 4.4, macOS 15.7.4 arm64 for the Unix path, and macOS 26.6.2 arm64
-for the XPC path.
-[CONTRACT.md](CONTRACT.md) has the full "what was tested where" table, and the
-reasoning for every cell above. The `bind_attack_*_test.go` files run this
-platform's own impersonation attack against `Bind`, and `go run ./cmd/peerid`
-prints what this machine can prove, then runs an honest caller and the attack
-against a service that uses both paths — two real processes, one real
-connection, no simulation.
+The repository contains platform tests and retained execution evidence from
+Windows 11, Linux 6.18 and 4.4, macOS 15.7.4 arm64 for Unix sockets, and macOS
+26.6.2 arm64 for XPC. Those records do not establish that every current test has
+run on every platform. [CONTRACT.md](CONTRACT.md) states the rules and remaining
+fixture gaps; [HISTORY.md](HISTORY.md) preserves the earlier measurements.
+
+The existing `cmd/peerid` example prints the native stream ceiling, then runs
+an honest caller and this platform's impersonation attack against a service
+using snapshots and bindings. From this module's root, run:
+
+```sh
+go run ./cmd/peerid
+```
+
+From the private workspace root the same command is
+`go -C openabstractions-flat/abstraction-identity run ./cmd/peerid`. This exercises
+real processes and a native stream connection; it does not demonstrate XPC.
+The `bind_attack_*_test.go` files contain the corresponding platform attacks.
 
 ### Why macOS is the one that needs a Mac
 
@@ -279,6 +341,31 @@ made above.
 - `research/macos-xpc-exec-proof.md`
 - `research/adoption/opencode-bun-binding/RESULTS.md`
 
+## Status
+
+**In development.** Windows named pipes, Linux Unix sockets and macOS XPC provide
+the Program evidence used by current protected service tests. The macOS Unix
+socket path remains below that policy and fails closed. The XPC implementation
+described here is current source behavior. The retained macOS 0.3.0 runtime
+release receipt pins identity `v0.4.2` at
+`98a2d9a42684a9c58d9d137d91e196e51ba1e2d6`. On macOS 26.6.2 arm64 its installed
+and reinstalled XPC checks both passed: default discovery `ReadUser` succeeded,
+`ReplaceUser` was forbidden, and the revision stayed unchanged. The exact private
+records are `research/release-0.3.0/macos-installed/receipt.json`,
+`logs/installed_check.log` and `logs/reinstalled_check.log` beneath that directory.
+This is release evidence for that package, not an all-platform test claim for
+the current source tree.
+
 ## Licence
 
 Apache-2.0. See [LICENSE](https://github.com/openabstractions/abstraction-identity/blob/main/LICENSE).
+
+<!-- BEGIN GENERATED PERMISSION DEFINITIONS -->
+
+## Permission definitions
+
+Generated from the existing compiled catalogue. [RIGHTS.json](RIGHTS.json) contains the complete action/profile records, disclosure, lifecycle, first-use behavior, selector support and finite bundles.
+
+This projection has no named action definition for Identity. Receiving peer proof and program comparison retain their existing contract.
+
+<!-- END GENERATED PERMISSION DEFINITIONS -->

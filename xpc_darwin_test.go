@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -41,5 +42,23 @@ func TestOpenXPCListenerRejectsForgedRegistration(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatalf("unregistered listener helper: %v\n%s", err, output)
+	}
+}
+
+func TestOpenXPCClientRejectsNonCodeProgram(t *testing.T) {
+	program := filepath.Join(t.TempDir(), "not-a-program")
+	if err := os.WriteFile(program, []byte("ordinary non-code expected program\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	service := "com.openabstractions.test.invalidprogram." + strconv.Itoa(os.Getpid())
+	client, err := OpenXPCClient(ctx, service, program, uint32(os.Geteuid()), 1024)
+	if client != nil {
+		client.Close()
+		t.Fatal("non-code expected program returned a client")
+	}
+	if !errors.Is(err, ErrNoBinding) {
+		t.Fatalf("non-code expected program error = %v, want ErrNoBinding", err)
 	}
 }

@@ -1,5 +1,7 @@
 # Rust binding to shared IPC
 
+*For transport and client-library authors writing Rust.*
+
 This page is for whoever builds or embeds an OA client transport in Rust, or a
 generated Rust capability client on top of it. An application calling a
 capability resolves a typed client through the facade instead.

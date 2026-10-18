@@ -1,5 +1,7 @@
 # Shared Rust framed transport contract
 
+*For transport and client-library authors writing Rust.*
+
 This page is for whoever implements or consumes the pure-Rust transport trait
 generated Rust capability clients share. An application calling a capability
 resolves a typed client through the facade instead.

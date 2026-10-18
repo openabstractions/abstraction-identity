@@ -1,5 +1,7 @@
 # Python shared IPC client
 
+*For transport and client-library authors writing Python.*
+
 This page is for whoever builds or embeds an OA client transport in Python, or
 a generated Python service client on top of it. An application calling a
 capability resolves a typed client through the facade instead.

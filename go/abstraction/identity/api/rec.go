@@ -321,9 +321,9 @@ func (v Proof) Known() bool {
 	return ok
 }
 
-var NativeOperations = []string{"OfHandle", "OfConn", "CanEver", "Check", "Get", "AtLeast"}
+var NativeOperations = []string{"OfHandle", "OfConn", "Bind", "BindConn", "BindXPCRequest", "Ceiling", "CeilingFor", "CanEver", "Check", "Get", "AtLeast", "Binding.Peer", "Binding.Check", "Binding.Alive", "Binding.Captured", "Binding.BoundAt", "Binding.EvidenceValidUntil", "Binding.Shared", "Binding.Close"}
 
-var NativeBindingTypes = []string{"Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options"}
+var NativeBindingTypes = []string{"Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options", "Binding", "Need", "Limits", "Transport", "XPCRequest"}
 
 // Minimum proof for each native Peer attribute. Policy comparison uses the
 // declared native order. A serialized requirement or proof name never supplies

@@ -5,10 +5,16 @@ package identity
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
+)
+
+// These lookups are variables so tests can exercise their failure paths
+// without depending on a remote machine or an OS failure.
+var (
+	localityClientComputerName = namedPipeClientComputerName
+	localityComputerName       = windows.ComputerName
 )
 
 func ceiling() Limits {
@@ -188,19 +194,24 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 
 // requireLocalPeer refuses a client that is not on this machine.
 func requireLocalPeer(pipe windows.Handle) error {
-	client, err := namedPipeClientComputerName(pipe)
+	client, err := localityClientComputerName(pipe)
 	if err != nil {
-		// Old builds and some pipe configurations will not answer. The
-		// pid check that follows is the backstop: a remote client has no
-		// local pid and OpenProcess will fail or name a different
-		// process, which is caught by the start-time check.
-		return nil
+		// Windows reports ERROR_PIPE_LOCAL instead of returning the local
+		// computer name. That is positive locality evidence, not a lookup
+		// failure.
+		if errors.Is(err, windows.ERROR_PIPE_LOCAL) {
+			return nil
+		}
+		return fmt.Errorf("%w: client computer name could not be established: %v", ErrUnsupportedConn, err)
 	}
-	local, err := windows.ComputerName()
+	local, err := localityComputerName()
 	if err != nil {
-		return nil
+		return fmt.Errorf("%w: local computer name could not be established: %v", ErrUnsupportedConn, err)
 	}
-	if !strings.EqualFold(client, local) {
+	// A computer name is not a path: it compares as Windows compares
+	// computer names, ordinal ignoring case through the system uppercase
+	// table (CompareStringOrdinal), never by Unicode folding.
+	if !ordinalEqualIgnoringCase(client, local) {
 		return fmt.Errorf("%w: the client is on %q, not %q", ErrRemotePeer, client, local)
 	}
 	return nil

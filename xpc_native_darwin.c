@@ -399,11 +399,29 @@ static void maybe_retire_session(oa_xpc_session_state *state) {
   });
 }
 
+static void cancel_with_noop_handler(xpc_connection_t connection) {
+  // An owned connection may be inactive and lack a handler after setup fails.
+  // Cancel before activation so cleanup cannot send a bootstrap or session call.
+  xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
+    (void)event;
+  });
+  xpc_connection_cancel(connection);
+  xpc_connection_activate(connection);
+}
 static void close_session(oa_xpc_session_state *state) {
   if (!state || atomic_exchange(&state->closed, 1))
     return;
   if (state->anonymous_listener)
     xpc_connection_cancel(state->anonymous_listener);
+}
+
+static void close_untracked_session(oa_xpc_session_state *state) {
+  close_session(state);
+  if (state->anonymous_listener) {
+    cancel_with_noop_handler(state->anonymous_listener);
+    xpc_release(state->anonymous_listener);
+    state->anonymous_listener = NULL;
+  }
 }
 
 static void session_peer(oa_xpc_session_state *state, xpc_connection_t peer) {
@@ -550,11 +568,7 @@ static void bootstrap_peer(oa_xpc_listener *l, xpc_connection_t peer) {
     if (!state->anonymous_listener ||
         !track_connection(l, state->anonymous_listener)) {
       send_refusal(event, peer, NULL);
-      close_session(state);
-      if (state->anonymous_listener) {
-        xpc_release(state->anonymous_listener);
-        state->anonymous_listener = NULL;
-      }
+      close_untracked_session(state);
       return;
     }
     xpc_connection_set_event_handler(
@@ -1096,9 +1110,9 @@ void oa_xpc_client_close(oa_xpc_client *c) {
   if (!c || atomic_exchange(&c->closed, 1))
     return;
   if (c->session)
-    xpc_connection_cancel(c->session);
+    cancel_with_noop_handler(c->session);
   if (c->bootstrap)
-    xpc_connection_cancel(c->bootstrap);
+    cancel_with_noop_handler(c->bootstrap);
 }
 void oa_xpc_client_free(oa_xpc_client *c) {
   if (!c)

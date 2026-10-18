@@ -33,7 +33,15 @@ func TestAPackagedIdentityOutsideItsFolderKeepsItsPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	// PowerShell ends a single-quoted string at ' and at U+2018..U+201B; each
+	// is doubled (the rule of abstraction-download/go/powershell.Literal,
+	// which this module cannot import).
+	quote := func(s string) string {
+		for _, q := range []string{"'", "‘", "’", "‚", "‛"} {
+			s = strings.ReplaceAll(s, q, q+q)
+		}
+		return "'" + s + "'"
+	}
 	script := fmt.Sprintf("Invoke-CommandInDesktopPackage -PackageFamilyName %s -AppId %s -Command %s -Args %s -PreventBreakaway",
 		quote(family), quote(app), quote(os.Args[0]), quote("-test.run=^TestPackagedClientHelper$ -- "+name))
 	if out, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput(); err != nil {

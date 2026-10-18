@@ -3,7 +3,6 @@ package identity
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -97,6 +96,10 @@ type User struct {
 	// IntegrityRID is the raw mandatory label RID behind Integrity, for
 	// comparisons the named levels are too coarse for. Zero when unknown.
 	IntegrityRID uint32
+	// Restricted reports a restricted token (CreateRestrictedToken), whose
+	// restricting SIDs can deny access the account itself has. An unreadable
+	// flag reads restricted.
+	Restricted bool
 
 	// POSIX.
 	UID int // -1 when unknown
@@ -140,6 +143,9 @@ func (u User) String() string {
 		}
 		if u.Elevated {
 			s += " elevated"
+		}
+		if u.Restricted {
+			s += " restricted"
 		}
 		return s
 	case "posix":
@@ -220,7 +226,18 @@ type Code struct {
 	Status string
 	// Catalog is true on Windows when the signature came from a system
 	// catalog rather than from an embedded signature in the file itself.
+	// Subject and Issuer then name the signer of the catalog Windows
+	// accepted, and are empty when a catalog refused the file.
 	Catalog bool
+	// Description and OriginalName are the FileDescription and
+	// OriginalFilename of the program's version resource on Windows, read
+	// from the held image whose signature Windows accepted. A prompt names a
+	// signed program by them (VISION 2026-10-01). Both are empty when Trusted
+	// is false, when the image carries no version resource, and on every
+	// other platform. They name the program its publisher shipped; the file
+	// name on disk can be anything.
+	Description  string
+	OriginalName string
 
 	// TeamID is the Apple Developer team identifier out of the validated
 	// signature on macOS, and empty elsewhere.
@@ -497,8 +514,11 @@ func (o *Options) codeRequirement() string {
 	return o.CodeRequirement
 }
 
-// samePath compares two filesystem paths for the platforms this package
-// supports. Windows paths are case-insensitive; the comparison is only ever
-// used between two paths the kernel produced for the same handle, never
-// against anything a peer supplied.
-func samePath(a, b string) bool { return strings.EqualFold(a, b) }
+// samePath reports whether two paths name one file, by file identity
+// (SameFile); a path that no longer names a file is not the same. The
+// comparison is only ever used between two paths the kernel produced for the
+// same handle, never against anything a peer supplied.
+func samePath(a, b string) bool {
+	same, err := SameFile(a, b)
+	return err == nil && same
+}

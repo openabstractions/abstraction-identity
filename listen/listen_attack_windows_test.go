@@ -28,8 +28,9 @@ import (
 // runs, and each must be refused.
 
 const (
-	attackEnv  = "LISTEN_ATTACK_PIPE"
-	attackMode = "LISTEN_ATTACK_MODE"
+	attackEnv                = "LISTEN_ATTACK_PIPE"
+	attackMode               = "LISTEN_ATTACK_MODE"
+	listenSecurityProbeOptIn = "OA_IDENTITY_SANDBOX_SECURITY_TESTS"
 
 	attackerGotIn   = 0
 	attackerRefused = 3
@@ -37,12 +38,23 @@ const (
 
 func TestMain(m *testing.M) {
 	if name := os.Getenv(attackEnv); name != "" {
+		if os.Getenv(listenSecurityProbeOptIn) != "1" {
+			fmt.Fprintf(os.Stderr, "refusing sandbox security child mode %q without %s=1 after explicit Daybreak clearance\n", os.Getenv(attackMode), listenSecurityProbeOptIn)
+			os.Exit(1)
+		}
 		os.Exit(runAttacker(name, os.Getenv(attackMode)))
 	}
 	if name := os.Getenv(serverEnv); name != "" {
 		os.Exit(runServer(name))
 	}
 	os.Exit(m.Run())
+}
+
+func requireListenSecurityProbeOptIn(t *testing.T) {
+	t.Helper()
+	if os.Getenv(listenSecurityProbeOptIn) != "1" {
+		t.Skipf("sandbox security probes are paused until the owner confirms Daybreak access is clear; set %s=1 only after that confirmation", listenSecurityProbeOptIn)
+	}
 }
 
 func runAttacker(name, mode string) int {
@@ -198,6 +210,7 @@ func TestThePipeNamesOneAccountAndNoOneElse(t *testing.T) {
 // filesystem supplies and this listener now does not. Measured before the
 // descriptor landed: GENERIC_READ OPENED.
 func TestAProcessWithNoClaimToThisAccountIsRefused(t *testing.T) {
+	requireListenSecurityProbeOptIn(t)
 	l, name := serving(t)
 	tok := restrictedToEveryone(t)
 	defer tok.Close()
@@ -225,6 +238,7 @@ func TestAProcessWithNoClaimToThisAccountIsRefused(t *testing.T) {
 // the label this attacker opened the pipe for read and was refused only the
 // write. Measured before: GENERIC_READ OPENED, RW refused.
 func TestASandboxedProcessInThisAccountIsRefused(t *testing.T) {
+	requireListenSecurityProbeOptIn(t)
 	l, name := serving(t)
 	tok := loweredToLowIntegrity(t)
 	defer tok.Close()
@@ -257,6 +271,7 @@ func TestASandboxedProcessInThisAccountIsRefused(t *testing.T) {
 // boundary this layer states, and it is the reason a client must verify the
 // server it reached rather than trust the name it dialled.
 func TestWhoCanStillTakeTheName(t *testing.T) {
+	requireListenSecurityProbeOptIn(t)
 	_, name := serving(t)
 
 	stranger := restrictedToEveryone(t)

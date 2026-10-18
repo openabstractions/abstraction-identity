@@ -164,6 +164,89 @@ func TestClientEndIsRefused(t *testing.T) {
 	}
 }
 
+func TestWindowsIdentityRefusesUnknownLocality(t *testing.T) {
+	clientLookup := localityClientComputerName
+	computerLookup := localityComputerName
+	t.Cleanup(func() {
+		localityClientComputerName = clientLookup
+		localityComputerName = computerLookup
+	})
+
+	for _, entry := range []string{"OfHandle", "Bind"} {
+		for _, failure := range []string{"client computer name", "local computer name"} {
+			t.Run(entry+"/"+failure, func(t *testing.T) {
+				name := pipeName(t)
+				server := listen(t, name)
+				client := dial(t, name)
+				connectedAt := accept(t, server)
+				var written uint32
+				if err := windows.WriteFile(client, []byte("x"), &written, nil); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+				readFrom(t, server)
+
+				localityClientComputerName = func(windows.Handle) (string, error) {
+					if failure == "client computer name" {
+						return "", errors.New("injected client lookup failure")
+					}
+					return "local", nil
+				}
+				localityComputerName = func() (string, error) {
+					if failure == "local computer name" {
+						return "", errors.New("injected local lookup failure")
+					}
+					return "local", nil
+				}
+
+				if entry == "OfHandle" {
+					if peer, err := OfHandle(Handle(server), &Options{ConnectedAt: connectedAt}); !errors.Is(err, ErrUnsupportedConn) || peer != nil {
+						t.Fatalf("OfHandle = (%v, %v), want nil peer and ErrUnsupportedConn", peer, err)
+					}
+				} else {
+					if binding, err := Bind(Handle(server), &Options{ConnectedAt: connectedAt}); !errors.Is(err, ErrUnsupportedConn) || binding != nil {
+						if binding != nil {
+							binding.Close()
+						}
+						t.Fatalf("Bind = (%v, %v), want nil binding and ErrUnsupportedConn", binding, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestWindowsIdentityLocalityControls(t *testing.T) {
+	clientLookup := localityClientComputerName
+	computerLookup := localityComputerName
+	t.Cleanup(func() {
+		localityClientComputerName = clientLookup
+		localityComputerName = computerLookup
+	})
+
+	for _, tc := range []struct {
+		name       string
+		clientName string
+		clientErr  error
+		wantErr    error
+	}{
+		{name: "same host", clientName: "LOCAL"},
+		{name: "local pipe sentinel", clientErr: windows.ERROR_PIPE_LOCAL},
+		{name: "different host", clientName: "remote", wantErr: ErrRemotePeer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			localityClientComputerName = func(windows.Handle) (string, error) { return tc.clientName, tc.clientErr }
+			localityComputerName = func() (string, error) { return "local", nil }
+			err := requireLocalPeer(0)
+			if tc.wantErr == nil && err != nil {
+				t.Fatalf("requireLocalPeer = %v, want nil", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("requireLocalPeer = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestRecycledPIDIsRefused forces the pid-reuse check to fire by claiming the
 // connection is older than the peer process. A real recycled pid is not
 // reproducible on demand; this drives the same branch by the same comparison,
@@ -362,15 +445,15 @@ func TestCodeSignatureOfASignedBinary(t *testing.T) {
 	if !c.Trusted || verdict != ProofBound {
 		t.Errorf("Windows does not trust its own %s: %s %q", signed, verdict, c.Status)
 	}
-	// Its signature lives in a system catalog, not in the file, so the
-	// publisher name is not extractable from the file itself. That is worth
-	// asserting: "signed and trusted" and "we can name the publisher" are
-	// different questions, and a consent prompt needs the second.
-	if subject, _, err := signerName(p); err == nil {
-		t.Logf("%s carries an embedded signature by %q", signed, subject)
-	} else {
-		t.Logf("%s is trusted but has no embedded signature to name a publisher from (%v); "+
-			"catalog-signed files are trusted without being attributable from the file alone", signed, err)
+	// Windows 11 builds embed a signature in kernel32.dll and also list it
+	// in a system catalog; older builds sign it only through the catalog.
+	// Either way the publisher is named: the embedded signer, or the
+	// signer of the catalog verifyTrust accepted the file through.
+	_, _, embedErr := signerName(p, windows.CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED)
+	c = withSigner(c, p)
+	t.Logf("%s: embedded=%v catalog=%v subject=%q issuer=%q", signed, embedErr == nil, c.Catalog, c.Subject, c.Issuer)
+	if !c.Trusted || c.Catalog != (embedErr != nil) || c.Subject != "Microsoft Windows" || c.Issuer == "" {
+		t.Errorf("the signer of %s is not named: %+v", signed, c)
 	}
 }
 

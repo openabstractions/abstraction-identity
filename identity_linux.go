@@ -237,16 +237,17 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 	// This is NOT the Windows bound. There, a process handle yields a
 	// creation FILETIME and the comparison against ConnectedAt is exact.
 	// Here the start time comes out of /proc/<pid>/stat in USER_HZ ticks
-	// since boot and has to be turned into a wall clock through /proc/uptime,
-	// which is accurate to tens of milliseconds at the very best. A bound
+	// since boot and is converted with /proc/stat's boot epoch. That epoch
+	// has one-second precision; the conversion is stable across reads but
+	// approximate against a connection's wall clock. A bound
 	// that is approximately right is not a bound, so this never promotes a
 	// proof. It is only ever allowed to refuse: a process that demonstrably
 	// started well after the connection is not the peer, whatever the clock's
 	// precision.
 	//
 	// And it is skipped entirely when a pidfd is holding the pid, because
-	// there the reuse question is already answered exactly. Letting a fuzzy
-	// clock conversion overrule a kernel-held pin could only ever produce a
+	// there the reuse question is already answered exactly. Letting an
+	// approximate clock conversion overrule a kernel-held pin could produce a
 	// false refusal.
 	if started, err := processStartTime(pid); err == nil {
 		proc.StartTime = started
@@ -327,8 +328,9 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 	return p, nil
 }
 
-// startTimeSlop is the width of the /proc start-time conversion, and the reason
-// that conversion may only ever refuse. See the comment at its use.
+// startTimeSlop covers the boot epoch's one-second precision, tick
+// quantization and connection timestamp uncertainty. A clock comparison can
+// refuse an impossible peer; it cannot promote process proof.
 const startTimeSlop = 2 * time.Second
 
 // requireAcceptedUnixSocket refuses anything that is not a connected AF_UNIX

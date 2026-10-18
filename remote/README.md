@@ -1,5 +1,7 @@
 # Authenticated remote frames
 
+*For transport authors building remote hosts or clients.*
+
 This page is for whoever builds a remote host or client transport for OA over
 TLS. An application calling a capability resolves a local or remote binding
 through the facade instead.

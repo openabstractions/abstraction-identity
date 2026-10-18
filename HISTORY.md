@@ -24,6 +24,131 @@ Linked from [CONTRACT.md](CONTRACT.md)'s "Reading this page."
 | `ID-X3` | ID-M3 | `ProofSigned` is not reachable over a socket |
 | `ID-X4` | ID-M4 | without cgo there is no code identity |
 
+## Added
+
+- **`ID-F1` firmlinks and the mount-table read** (2026-10-07). Review of
+  the per-mount cap: on macOS `/Users/...` and `/Applications/...` counted
+  against `/` and not `/System/Volumes/Data`, and `/home` is a root link to
+  the `auto_home` automount, so a dead home share used up `/` for every
+  path. Paths and mount points are now rewritten through
+  `/usr/share/firmlinks` and the root's symbolic links before the longest
+  mount point is chosen; on the Mac `/home/u` counts against
+  `/System/Volumes/Data/home`. The mount-table refresh ran under the shared
+  lock outside the deadline; it now runs in one background goroutine, a
+  stale table is used meanwhile, and a caller with no table waits only
+  within its deadline. Readers are swapped under the table's lock, which
+  `-race` showed was needed.
+- **`ID-F1` probe cap per mount; stacked file systems** (2026-10-07).
+  Review of the Linux change: one dead, hard-mounted NFS share held all
+  eight process-wide probe slots, after which `LocalPath` refused every
+  path, local ones included, on macOS and Linux alike; a burst of more than
+  eight calls on a healthy volume was also refused when the probes ran
+  slowly. The cap is now kept per mount, chosen from the mount table by the
+  path's spelling and read without asking any volume. A mount with a probe
+  past its deadline refuses further paths at once, and a healthy mount's
+  burst waits for a slot within the deadline. Coordinator decision: a
+  stacked file system (overlayfs, fuse-overlayfs, squashfuse, loop images)
+  is judged by its top layer and its lower layers are not probed, so
+  container roots stay local. A FUSE path whose device-number `stat` blocks
+  is refused within the deadline and releases its slot once the `stat`
+  returns.
+- **`ID-F1` on Linux** (2026-10-07): `LocalPath` refuses a path whose
+  volume's `statfs` `f_type` is a network or shared file system (NFS,
+  SMB/CIFS/SMB2, Ceph, AFS, 9P and the others the contract lists) or an
+  unmounted autofs point, and a FUSE mount whose `/proc/self/mountinfo` type,
+  matched by device number, is not known local; until then Linux admitted
+  every path. The deadline, the eight-probe cap counted from start, the
+  `TreatVolumeAsNetwork` test hook and the walk up to the deepest existing
+  folder are shared with macOS in one file (`localpath_statfs.go`); each
+  platform supplies only its answer for the volume. WSL's Windows drives
+  under `/mnt` are 9P and are refused. No Linux-only consumer calls the path
+  functions; the cross-platform consumers already fail closed, and
+  `privatedir`'s fail-closed models-root test now runs on Linux.
+- **`ID-F1` on macOS** (2026-10-06): `LocalPath` refuses a path whose volume
+  `statfs` does not report `MNT_LOCAL`, and one whose volume does not answer
+  within 500 ms. Review of the permission prompt's requester icon found a
+  program under `/Volumes/<share>` reaching `NSWorkspace.icon` on the
+  launcher's UI thread, where a dead mount hangs the prompt; until then every
+  path off Windows was local. Coordinator decision: fix at this owner. Every
+  `SameFile`, `Within`, `FileKey`, `PlaceKey` and `LocalPath` caller on macOS
+  now refuses network volumes; a subject program on one compares by
+  `SamePathName`. Linux is unchanged. Review of that change: every consumer
+  must fail closed. `Inside` no longer places a refused path by spelling
+  (spelling is kept only for a folder not created yet); `CheckModelsRoot`
+  refuses a refused root and reads a home-comparison error as "may hold";
+  the statfs cap counts each probe from its start, so a burst against a dead
+  mount leaves at most eight outstanding; and the Panel's ComfyUI retire
+  guard (`ProgramWithin`) keeps a version it cannot compare.
+- **`ID-D3`** (2026-10-02): `privatedir.ProtectModelFolder` and
+  `CheckModelFolder`. OA's own model folders under `OA-models` failed ID-D2:
+  files moved in from `%TEMP%` kept a sandbox group's modify and delete
+  entries, and every video launch hashed them in full. Coordinator decision
+  of 2026-10-02: OA owns its model folders with a protected DACL of this
+  account, SYSTEM and Administrators. Review of 6607b567d (2026-10-02): the
+  first form wrote by path with `SetNamedSecurityInfo`, whose propagation
+  reached a file outside the folder through a hard link, and could follow a
+  folder swapped mid-run. Every entry is now opened as itself and held with
+  data access (Windows records no share mode for a handle without it),
+  hard-linked files are accepted only when every name lies under OA's own
+  roots, each descriptor is written through its handle with
+  `SetKernelObjectSecurity`, and `CheckModelsRoot` refuses a drive root,
+  the home, known folders, a linked path and one that resolves elsewhere.
+- **`ID-S1`** (2026-10-01): `Self` exports the calling process's own
+  principal, read the way a peer's process token is read (`processUser`).
+  The job service's `LinkResult` (job JOB-A17) compares a caller with it;
+  before this the job module kept its own copy of the integrity-label SID
+  parser from `internal/integrity`. Review of 2026-10-01: an unreadable
+  label was RID 0 and an empty name, which compared as the lowest level; it
+  is now `Integrity` "unknown" on a peer and an error from `Self`, and RID 0
+  that was read names the untrusted level. `User.Restricted` reports a
+  restricted token, and an unreadable flag reads restricted.
+- **`ID-T8`** (2026-10-01): `BindUnixServer` binds the listening process
+  of a dialed AF_UNIX connection, through `SIO_AF_UNIX_GETPEERPID` on
+  Windows (an in-house `WSAIoctl` call; `afunix.sys` fills the process id
+  and reports zero bytes returned, measured on Windows 11 26200) and the
+  existing peer-credential bind on Linux and macOS. Engines OA launches
+  move from loopback ports to socket paths (VISION 2026-10-01, "Engines
+  adopt model bytes…"; `research/model-bytes/ENGINE-TRANSPORT.md` T2), and
+  the provider kit's engine client checks the socket's server with it
+  before the first byte (abstraction-inference INF-EL2). The Windows
+  loopback bind and this one share `pinnedProcessPeer`, which reads user,
+  path, package and code through the pinned handle. Review of 2026-10-01:
+  a recheck passes unanswered only for a closed or disconnected socket
+  (the ioctl keeps naming the server after the server exits, measured),
+  and any other failure refuses; the start-time guard and the
+  process-changed recheck have tests. 2026-10-08, 0.4.0 Mac probe: the
+  macOS half never bound. `requireAcceptedUnixSocket` refuses the client
+  end there with `ErrNotServerEnd`, and the socket's process would read
+  only at `pid` (`ID-M1`) had it passed. macOS now answers `ErrNoBinding`
+  with that reason, as `BindLoopbackServer` does; `ID-T8` says so.
+- **`AllSockets`** (2026-10-01, `ID-T7`): every TCP socket in any state
+  and every bound UDP socket with its owner (`TCP_TABLE_OWNER_PID_ALL`).
+  The coordinator decided that an engine OA launches on a socket path may
+  hold no network socket at all, outbound connections included
+  (abstraction-inference INF-EL2); `Sockets` lists listeners only.
+- **`ID-T7`** (2026-10-01): `Sockets`, `OwnedByTree`, `CheckLoopbackOnly`
+  and `CheckTreeLoopback` export the Windows socket owner tables and the
+  loopback-only rule for a contained process tree. The Lemonade provider
+  wrote them first under its own server package for the Lemonade 2026.39.1
+  security review's condition 6; the LocalAI attach check needs the same
+  proof, and the owner-table code already lived here beside `BindLoopback`.
+- **`ID-W4`** (2026-10-01): `VerifyFile` exports the Windows Authenticode
+  check for a file path. The Panel's native permission prompt (TODO HP8)
+  shows the requesting program's publisher with it; before this the
+  monitor kept its own copy of the WinVerifyTrust and signer-name calls.
+  Evidence: `feedback/hp8-native-authorization.md`.
+- **`Code.Description`, `Code.OriginalName`** (2026-10-01): a trusted
+  Windows image reports the `FileDescription` and `OriginalFilename` of its
+  own version resource, read through the verified handle (`ID-W4`, the
+  Windows section). Prompts name a signed program by them (`VISION.md`
+  2026-10-01, "A prompt names a signed program by its signed version
+  resource"). `Code` is not on the wire; no service version changes.
+  Review of 2026-10-01: `VerifyFile` holds its file without
+  `FILE_SHARE_WRITE` for the verification, so a file another handle holds
+  open for writing is refused at the open with a sharing violation, and a
+  failed resource read abandons a trusted verification. No caller in this
+  repository passes `VerifyFile` a file open for writing.
+
 ## Applied from research/vocabulary/DECISION.md
 
 - D21: "rung" is "proof level" throughout — the ladder `Proof` walks, what
@@ -58,6 +183,30 @@ Linked from [CONTRACT.md](CONTRACT.md)'s "Reading this page."
   (inference's own `Ceiling`/`CeilingLimit` is, at D64).
 
 ## Moved here
+
+**2026-10-01: `privatedir` from abstraction-inference.** The private-folder
+helper was `abstraction-inference/go/providerhost/privatedir`. The storage
+reader's digest record (storage-over-local-stores LS-12) needed it, and the
+review's first choice of home, `abstraction-facade/go`, already requires
+inference, so inference importing it from there would have made the two
+modules require each other. Identity is the module every caller already
+requires, requires no OA module, and owns accounts and SIDs; the package
+moved here as `go/privatedir` with no change of behaviour, under ID-D1.
+
+| id | before | now |
+| --- | --- | --- |
+| ID-D1 | inference's private-folder rule, stated in INF-EL2 and INF-MS7 | identity's own rule; INF-EL2, INF-MS7, Lemonade's folders and LS-12 cite it |
+
+**2026-10-01: `trustedpath` from the storage reader.** The owner and access
+check for the pinned ASUS files was the storage adapter's own
+(`adapters/asusai/trust_windows.go`, LS-12). The video provider binds model
+files in place and needs the same check, so it moved here as
+`go/trustedpath` with one owner, and now also walks every folder up to the
+volume root and refuses reparse points on the path.
+
+| id | before | now |
+| --- | --- | --- |
+| ID-D2 | storage LS-12's own check of the file and its folder | identity's rule over the file and every folder to the volume root, reparse points refused; LS-12 and the video provider call `trustedpath.CheckFile` |
 
 **Tested.** Windows and Linux were checked by the tests in this repository
 — Windows 11 and Linux 6.18 — not taken from documentation; where a test

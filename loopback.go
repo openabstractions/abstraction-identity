@@ -34,10 +34,9 @@ const TransportLoopback = "tcp-loopback"
 //     [LoopbackCeiling].
 //
 // Call it on the line after accept, before the service reads a byte, and
-// re-check with [Binding.Peer] before acting. c must be the accepted end: this
-// function cannot tell a connection the service dialed from one it accepted,
-// and a dialed connection would name the listening service. The returned
-// Binding must be closed before c.
+// re-check with [Binding.Peer] before acting. A dialed connection names the
+// listening service; callers proving an engine they dialed should use
+// [BindLoopbackServer]. The returned Binding must be closed before c.
 func BindLoopback(c net.Conn, opts *Options) (*Binding, error) {
 	tcp, ok := c.(*net.TCPConn)
 	if !ok {
@@ -55,7 +54,17 @@ func BindLoopback(c net.Conn, opts *Options) (*Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Binding{peer: peer, boundAt: time.Now(), inner: inner}, nil
+	return &Binding{peer: peer, boundAt: time.Now(), inner: &bindingState{inner: inner}}, nil
+}
+
+// BindLoopbackServer binds the listening process at the remote end of a
+// dialed IPv4 loopback connection. Call it before sending request bytes, check
+// its captured process against the child the caller started, and re-check with
+// Binding.Peer before trusting a reply. It uses the same pinned socket-owner
+// proof as BindLoopback; the endpoint order is already correct for a dialed
+// connection because its remote end is the server socket.
+func BindLoopbackServer(c net.Conn, opts *Options) (*Binding, error) {
+	return BindLoopback(c, opts)
 }
 
 // LoopbackCeiling reports what this platform can prove at best about the

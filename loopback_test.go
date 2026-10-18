@@ -5,6 +5,7 @@ package identity
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -79,6 +81,108 @@ func TestBindLoopbackNamesTheConnectingProcess(t *testing.T) {
 		t.Fatalf("an honest peer failed the ceiling this platform advertises: %v", err)
 	}
 	t.Logf("rung %s", b.Captured().Rung())
+}
+
+func TestBindLoopbackServerNamesTheListeningChild(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(exe)
+	child.Env = append(os.Environ(), loopbackServerEnv+"=1")
+	child.Stderr = os.Stderr
+	stdout, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	var address string
+	if _, err := fmt.Sscanf(line, "server %d %s", &pid, &address); err != nil {
+		t.Fatalf("child announcement %q: %v", line, err)
+	}
+	conn, err := net.Dial("tcp4", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	b, err := BindLoopbackServer(conn, &Options{ConnectedAt: time.Now(), SkipCodeSignature: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	for i := 0; i < 2; i++ {
+		peer, err := b.Peer()
+		if err != nil {
+			t.Fatal(err)
+		}
+		process, _ := peer.Process.Get()
+		if process.PID != pid || process.PID == os.Getpid() {
+			t.Fatalf("bound PID %d, want listening child %d rather than dialer %d", process.PID, pid, os.Getpid())
+		}
+	}
+}
+
+// A closed loopback binding answers net.ErrClosed through every method that
+// rechecks or queries the platform handle, a second Close returns the first
+// result, and Close concurrent with rechecks is race-clean.
+func TestBindLoopbackAnswersErrClosedAfterClose(t *testing.T) {
+	l := listenLoopback(t)
+	client, err := net.Dial("tcp4", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	conn, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	b, err := BindLoopback(conn, &Options{ConnectedAt: time.Now(), SkipCodeSignature: true})
+	if err != nil {
+		t.Fatalf("BindLoopback: %v", err)
+	}
+	view := b.Shared()
+	if _, err := view.Peer(); err != nil {
+		t.Fatalf("Peer before Close: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 20 {
+				_, _ = view.Peer()
+				_, _ = view.Alive()
+			}
+		}()
+	}
+	first := b.Close()
+	wg.Wait()
+
+	if _, err := b.Peer(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Peer after Close = %v, want net.ErrClosed", err)
+	}
+	if err := b.Check(Need{}); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Check after Close = %v, want net.ErrClosed", err)
+	}
+	if alive, err := b.Alive(); alive || !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Alive after Close = %v, %v; want false, net.ErrClosed", alive, err)
+	}
+	if _, err := view.Peer(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("shared Peer after owner Close = %v, want net.ErrClosed", err)
+	}
+	if second := b.Close(); second != first {
+		t.Fatalf("second Close = %v, want the first result %v", second, first)
+	}
 }
 
 // A connection that is not TCP names no loopback peer.

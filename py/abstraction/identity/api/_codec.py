@@ -154,10 +154,10 @@ class Proof(_StrEnum):
     SIGNED = "signed"
 
 
-NATIVE_OPERATIONS = ["OfHandle", "OfConn", "CanEver", "Check", "Get", "AtLeast"]
+NATIVE_OPERATIONS = ["OfHandle", "OfConn", "Bind", "BindConn", "BindXPCRequest", "Ceiling", "CeilingFor", "CanEver", "Check", "Get", "AtLeast", "Binding.Peer", "Binding.Check", "Binding.Alive", "Binding.Captured", "Binding.BoundAt", "Binding.EvidenceValidUntil", "Binding.Shared", "Binding.Close"]
 
 
-NATIVE_BINDING_TYPES = ["Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options"]
+NATIVE_BINDING_TYPES = ["Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options", "Binding", "Need", "Limits", "Transport", "XPCRequest"]
 
 
 @dataclasses.dataclass(kw_only=True)

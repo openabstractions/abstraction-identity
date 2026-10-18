@@ -217,7 +217,10 @@ func bindLoopback(client, server netip.AddrPort, opts *Options) (binder, *Peer, 
 	}
 	b.exe = exe
 	started, startErr := processStartTime(pid)
-	if connectedAt := opts.connectedAt(); startErr == nil && started.After(connectedAt.Add(startTimeSlop)) {
+	if startErr != nil {
+		return fail(fmt.Errorf("%w: pid %d start time could not be read: %v", ErrNoBinding, pid, startErr))
+	}
+	if connectedAt := opts.connectedAt(); started.After(connectedAt.Add(startTimeSlop)) {
 		return fail(fmt.Errorf("%w: pid %d started at %s, after this connection existed at %s", ErrPeerMoved, pid, started.Format(time.RFC3339Nano), connectedAt.Format(time.RFC3339Nano)))
 	}
 	if err := b.recheck(); err != nil {
@@ -260,6 +263,18 @@ func (b *loopbackLinuxBinding) recheck() error {
 	if err != nil {
 		return nil
 	}
+	if len(pids) == 0 {
+		// A peer may close between the socket-table read and descriptor
+		// scan. A second table read distinguishes that teardown from a
+		// still-established socket whose holder unexpectedly vanished.
+		again, still, readErr := socketRow(b.client, b.server)
+		if readErr == nil {
+			closed, err := b.emptyHolderRescan(again, still)
+			if closed || err != nil {
+				return err
+			}
+		}
+	}
 	if len(pids) != 1 || pids[0] != b.pid {
 		return fmt.Errorf("%w: the client socket is now held by %v; it was held by pid %d alone when the connection was accepted", ErrPeerMoved, pids, b.pid)
 	}
@@ -267,6 +282,18 @@ func (b *loopbackLinuxBinding) recheck() error {
 		return fmt.Errorf("%w: pid %d was %s when this connection was accepted and is %s now", ErrPeerMoved, b.pid, strconvQuote(b.exe), strconvQuote(exe))
 	}
 	return nil
+}
+
+// emptyHolderRescan classifies the second table observation after the holder
+// scan found no descriptor. An established same-inode row still needs a holder.
+func (b *loopbackLinuxBinding) emptyHolderRescan(row tcpRow, found bool) (closed bool, err error) {
+	if !found || !row.established {
+		return true, nil
+	}
+	if row.inode != b.inode {
+		return false, fmt.Errorf("%w: %s is now socket inode %d; it was %d when the connection was accepted", ErrPeerMoved, b.client, row.inode, b.inode)
+	}
+	return false, nil
 }
 
 func (b *loopbackLinuxBinding) alive() (bool, error) { return pidfdAlive(b.pidfd, b.pid) }

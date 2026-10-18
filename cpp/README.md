@@ -1,5 +1,7 @@
 # Shared IPC client byte transport
 
+*For transport and client-library authors writing C++.*
+
 This page is for whoever builds or embeds an OA client transport in C++, or a
 generated C++ service client on top of it. An application calling a capability
 resolves a typed client through the facade instead.

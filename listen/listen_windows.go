@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -59,12 +60,25 @@ type pipeListener struct {
 	closed    bool
 }
 
-func Listen(name string) (Listener, error) {
+func Listen(name string) (Listener, error) { return ListenAdmitting(name, admittedContainers(name)...) }
+
+// ListenAdmitting is Listen whose pipe also admits each AppContainer named in
+// containers, by the string form of its SID: one entry per container beside
+// this account's, with the medium label kept (ID-K1). The caller names the
+// containers it created; a connecting process never names one. A SID that is
+// not one AppContainer's, the all-application-packages groups included, is
+// refused before the pipe exists.
+func ListenAdmitting(name string, containers ...string) (Listener, error) {
 	n, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
 		return nil, err
 	}
-	sa, err := ownAccountOnly()
+	for _, c := range containers {
+		if err := appContainerSID(c); err != nil {
+			return nil, err
+		}
+	}
+	sa, err := ownAccountOnly(containers...)
 	if err != nil {
 		return nil, err
 	}
@@ -82,14 +96,13 @@ func Listen(name string) (Listener, error) {
 // pipe filesystem supplies one that grants Everyone and ANONYMOUS LOGON read,
 // and no integrity label, so a sandboxed process in this account reads it too.
 // Both were measured, and both are attacked in listen_attack_windows_test.go.
-func ownAccountOnly() (*windows.SecurityAttributes, error) {
+func ownAccountOnly(containers ...string) (*windows.SecurityAttributes, error) {
 	tok := windows.Token(windows.GetCurrentProcessToken())
 	u, err := tok.GetTokenUser()
 	if err != nil {
 		return nil, fmt.Errorf("listen: whose account this is could not be read: %w", err)
 	}
-	sd, err := windows.SecurityDescriptorFromString(
-		"D:P(A;;FA;;;" + u.User.Sid.String() + ")S:(ML;;NRNWNX;;;" + ourLabel(tok) + ")")
+	sd, err := windows.SecurityDescriptorFromString(pipeDescriptor(u.User.Sid.String(), ourLabel(tok), containers))
 	if err != nil {
 		return nil, fmt.Errorf("listen: the pipe's door could not be built: %w", err)
 	}
@@ -97,6 +110,37 @@ func ownAccountOnly() (*windows.SecurityAttributes, error) {
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: sd,
 	}, nil
+}
+
+// pipeDescriptor is the pipe's door: this account, then one entry for each
+// admitted AppContainer, protected, with the integrity label kept. One
+// explicit entry lets a contained client through a medium label; granting
+// ALL APPLICATION PACKAGES instead would admit every browser sandbox and
+// Store app of the account (research/engine-sandbox/REPORT.md).
+func pipeDescriptor(user, label string, containers []string) string {
+	d := "D:P(A;;FA;;;" + user + ")"
+	for _, c := range containers {
+		// FILE_GENERIC_WRITE includes FILE_CREATE_PIPE_INSTANCE. Grant only
+		// client data read/write and sync, so a client cannot become a server.
+		d += "(A;;0x0012019B;;;" + c + ")"
+	}
+	return d + "S:(ML;;NRNWNX;;;" + label + ")"
+}
+
+// appContainerSID refuses s unless it is one AppContainer's SID:
+// S-1-15-2 and seven sub-authorities.
+func appContainerSID(s string) error {
+	sid, err := windows.StringToSid(s)
+	if err != nil {
+		return fmt.Errorf("listen: %q is no SID: %w", s, err)
+	}
+	// Judged on the canonical text: the SID lives outside Go's heap, where
+	// x/sys's accessors trip the race detector's pointer checks.
+	parts := strings.Split(sid.String(), "-")
+	if len(parts) != 11 || parts[2] != "15" || parts[3] != "2" {
+		return fmt.Errorf("listen: %s is not one AppContainer's SID", s)
+	}
+	return nil
 }
 
 // Medium is the integrity of the ordinary interactive process every client of
@@ -283,4 +327,13 @@ type pipeAddr string
 func (pipeAddr) Network() string  { return "pipe" }
 func (a pipeAddr) String() string { return string(a) }
 
-func Endpoint(service string) string { return `\\.\pipe\openabstractions-` + service }
+// Endpoint expands a local service name and preserves an already-qualified
+// pipe address. Older provider entrypoints call Endpoint on the substituted
+// supervisor argument; preserving that address avoids a second pipe prefix.
+func Endpoint(service string) string {
+	const pipePrefix = `\\.\pipe\`
+	if len(service) > len(pipePrefix) && strings.EqualFold(service[:len(pipePrefix)], pipePrefix) {
+		return service
+	}
+	return pipePrefix + "openabstractions-" + service
+}

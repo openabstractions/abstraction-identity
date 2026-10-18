@@ -49,8 +49,11 @@ struct ProofFailure {
  3: required Proof need
  4: required string why
 }(unknown_fields="refuse",doc="Diagnostic refusal metadata. Underlying native attribute and connection evidence remain inseparable; this record cannot create authenticated evidence.")
-const list<string> native_operations = ["OfHandle", "OfConn", "CanEver", "Check", "Get", "AtLeast"]
-const list<string> native_binding_types = ["Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options"]
+// Core native API inventory, not wire-callable operations. BindXPCRequest and
+// XPCRequest are available only on darwin with cgo; CeilingFor reports whether
+// a selected transport is supported. Other native helpers live in Go's API.
+const list<string> native_operations = ["OfHandle", "OfConn", "Bind", "BindConn", "BindXPCRequest", "Ceiling", "CeilingFor", "CanEver", "Check", "Get", "AtLeast", "Binding.Peer", "Binding.Check", "Binding.Alive", "Binding.Captured", "Binding.BoundAt", "Binding.EvidenceValidUntil", "Binding.Shared", "Binding.Close"]
+const list<string> native_binding_types = ["Handle", "Peer", "Attr<T>", "User", "Process", "Code", "Options", "Binding", "Need", "Limits", "Transport", "XPCRequest"]
 // Native OS handles, ownership, connect-time clocks and generic Attr<T> cannot
 // cross a message as authority. This generates common vocabulary only; the
 // native binding supplies these types, proof comparison and extraction methods.

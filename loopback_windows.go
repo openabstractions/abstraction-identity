@@ -175,40 +175,10 @@ func bindLoopback(client, server netip.AddrPort, opts *Options) (binder, *Peer, 
 }
 
 func (b *loopbackWindowsBinding) peer(opts *Options) (*Peer, error) {
-	p := &Peer{
-		Platform:   "windows",
-		Transport:  TransportLoopback,
-		ObservedAt: time.Now(),
-		Package:    unknown[string]("package", "not resolved"),
-		Code:       unknown[Code]("code", "not resolved"),
-	}
-	user, why, err := processUser(b.proc)
-	if err != nil {
-		return nil, fmt.Errorf("%w: the creator's token could not be read: %v", ErrNoBinding, err)
-	}
-	p.User = attr("user", user, ProofBound, joinWhy("read from the access token of the process that created the client socket, through a handle that cannot be a recycled pid", why))
-	p.Process = attr("process", Process{PID: int(b.pid), StartTime: b.started}, ProofBound,
-		"the TCP owner table names the process that created the client socket; its handle is pinned and its creation time predates the connection")
-	imagePath, err := processImagePath(b.proc)
-	if err != nil {
-		return nil, fmt.Errorf("%w: QueryFullProcessImageName: %v", ErrNoBinding, err)
-	}
-	p.Path = attr("path", imagePath, ProofBound, "read through the pinned process handle; a path is not an identity - see CONTRACT.md")
-	if name, err := packageFullName(b.proc); err == nil && name != "" {
-		p.Package = attr("package", name, ProofSigned, "an MSIX package full name read through the pinned process handle")
-	} else {
-		p.Package = unknown[string]("package", "the peer is an ordinary executable, not an MSIX package")
-	}
-	if opts.skipCodeSignature() {
-		p.Code = unknown[Code]("code", "signature verification was skipped by the caller")
-	} else if code, verdict, verifiedAt, err := verifyProcessImageAt(b.proc, b.pid, b.started, imagePath, opts); err != nil {
-		p.Code = unknown[Code]("code", "verification could not be performed: "+err.Error())
-	} else {
-		p.recordCode(code, verdict, "Authenticode verified the file at the peer's image path, not the image the peer is executing")
-		p.evidenceValidUntil = verifiedAt.Add(codeVerdictLifetime)
-	}
-	p.note("transport: a loopback TCP connection carries no credentials; the process came from the TCP owner table")
-	return p, nil
+	return pinnedProcessPeer(b.proc, b.pid, b.started, TransportLoopback,
+		"read from the access token of the process that created the client socket, through a handle that cannot be a recycled pid",
+		"the TCP owner table names the process that created the client socket; its handle is pinned and its creation time predates the connection",
+		"transport: a loopback TCP connection carries no credentials; the process came from the TCP owner table", opts)
 }
 
 // processUser reads the principal off a pinned process's primary token.
@@ -226,13 +196,14 @@ func processUser(proc windows.Handle) (User, string, error) {
 	if err != nil {
 		return User{}, "", err
 	}
-	rid := tokenIntegrityRID(tok)
-	user := User{Kind: "windows", SID: sid.String(), Elevated: tok.IsElevated(), Integrity: integrityName(rid), IntegrityRID: rid, UID: -1, GID: -1}
-	why := ""
+	label := readTokenLabel(tok)
+	user := User{Kind: "windows", SID: sid.String(), Elevated: tok.IsElevated(), Integrity: label.integrity, IntegrityRID: label.rid,
+		Restricted: label.restricted, UID: -1, GID: -1}
+	why := label.why
 	if name, domain, err := accountName(sid); err == nil {
 		user.Name, user.Domain = name, domain
 	} else {
-		why = "the SID has no resolvable account name (" + err.Error() + ")"
+		why = joinWhy(why, "the SID has no resolvable account name ("+err.Error()+")")
 	}
 	return user, why, nil
 }

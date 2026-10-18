@@ -1,5 +1,7 @@
 # Installed C verified-open consumer
 
+*For maintainers running the C++ transport tests.*
+
 This test compiles `main.c` against the installed `abstraction/ipc/client.h` and
 links the installed shared IPC target. `fixture.cpp` supplies an isolated native
 peer and independently obtains the test process's image/principal. The

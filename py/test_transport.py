@@ -32,7 +32,113 @@ class Native:
         return CANCELLED
 
 
+class LinkedNative:
+    def __init__(self):
+        self.next_handle = 1
+        self.signalled = []
+        self.released = []
+
+    def _cancellation_create(self, out):
+        out._obj.value = self.next_handle
+        self.next_handle += 1
+        return 0
+
+    def _cancellation_signal(self, handle):
+        self.signalled.append(handle.value)
+
+    def _cancellation_release(self, handle):
+        self.released.append(handle.value)
+
+
 class TransportTests(unittest.TestCase):
+    def test_linked_cancellation_is_one_way_and_inherits_prior_signal(self):
+        native = LinkedNative()
+        parent = Cancellation(native)
+        child = parent.child()
+        self.assertEqual((parent._handle.value, child._handle.value), (1, 2))
+        child.signal()
+        self.assertEqual(native.signalled, [2])
+        parent.signal()
+        self.assertEqual(native.signalled[-2:], [1, 2])
+        late = parent.child()
+        self.assertEqual(native.signalled[-1], 3)
+        child.close()
+        late.close()
+        parent.close()
+        self.assertEqual(sorted(native.released), [1, 2, 3])
+        self.assertEqual(len(native.released), 3)
+
+    def test_parent_close_cancels_linked_child_without_releasing_it(self):
+        native = LinkedNative()
+        parent = Cancellation(native)
+        child = parent.child()
+        parent.close()
+        self.assertIn(2, native.signalled)
+        self.assertEqual(native.released, [1])
+        child.close()
+        self.assertEqual(native.released, [1, 2])
+        late = parent.child()
+        self.assertIn(3, native.signalled)
+        late.close()
+        self.assertEqual(native.released, [1, 2, 3])
+
+    def test_linked_signal_close_races_do_not_deadlock_or_leak(self):
+        for _ in range(100):
+            native = LinkedNative()
+            parent = Cancellation(native)
+            child = parent.child()
+            start = threading.Barrier(3)
+            signal = threading.Thread(target=lambda: (start.wait(), parent.signal()))
+            close = threading.Thread(target=lambda: (start.wait(), child.close()))
+            signal.start()
+            close.start()
+            start.wait()
+            signal.join(2)
+            close.join(2)
+            self.assertFalse(signal.is_alive() or close.is_alive())
+            parent.close()
+            self.assertEqual(sorted(native.released), [1, 2])
+
+    def test_parent_signal_reaches_in_flight_child_native_call(self):
+        native = Native()
+        parent = Cancellation(native)
+        child = parent.child()
+        outcomes = []
+        def read():
+            try:
+                FrameTransport(native, "endpoint", cancellation=child).exchange_frame(b"x")
+            except FrameError as error:
+                outcomes.append(error.status)
+        worker = threading.Thread(target=read)
+        worker.start()
+        self.assertTrue(native.opened.wait(1))
+        parent.signal()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(outcomes, [CANCELLED])
+        child.close()
+        parent.close()
+        self.assertEqual(native.release_count, 2)
+
+    def test_parent_close_and_child_creation_race_signals_child(self):
+        for _ in range(100):
+            native = LinkedNative()
+            parent = Cancellation(native)
+            children = []
+            start = threading.Barrier(3)
+            closer = threading.Thread(target=lambda: (start.wait(), parent.close()))
+            creator = threading.Thread(target=lambda: (start.wait(), children.append(parent.child())))
+            closer.start()
+            creator.start()
+            start.wait()
+            closer.join(2)
+            creator.join(2)
+            self.assertFalse(closer.is_alive() or creator.is_alive())
+            self.assertEqual(len(children), 1)
+            self.assertIn(2, native.signalled)
+            children[0].close()
+            self.assertEqual(sorted(native.released), [1, 2])
+
     def test_message_endpoint_uses_framed_native_boundary(self):
         calls = []
         class FramedNative:

@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	loopbackPassEnv = "IDENTITY_TEST_LOOPBACK_PASS"
-	loopbackHoldEnv = "IDENTITY_TEST_LOOPBACK_HOLD"
+	loopbackPassEnv   = "IDENTITY_TEST_LOOPBACK_PASS"
+	loopbackHoldEnv   = "IDENTITY_TEST_LOOPBACK_HOLD"
+	loopbackServerEnv = "IDENTITY_TEST_LOOPBACK_SERVER"
 )
 
 func loopbackHelperMain() (bool, int) {
@@ -31,8 +32,28 @@ func loopbackHelperMain() (bool, int) {
 		return true, 0
 	case os.Getenv(loopbackPassEnv) != "":
 		return true, runLoopbackPasser(os.Getenv(loopbackPassEnv))
+	case os.Getenv(loopbackServerEnv) != "":
+		return true, runLoopbackServer()
 	}
 	return false, 0
+}
+
+func runLoopbackServer() int {
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return 1
+	}
+	fmt.Printf("server %d %s\n", os.Getpid(), l.Addr())
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return 1
+		}
+		go func() {
+			defer c.Close()
+			time.Sleep(60 * time.Second)
+		}()
+	}
 }
 
 func runLoopbackPasser(addr string) int {

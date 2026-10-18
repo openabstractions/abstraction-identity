@@ -137,6 +137,9 @@ class Cancellation:
         self._condition = threading.Condition(self._lock)
         self._opening = 0
         self._closing = False
+        self._signaled = False
+        self._children = set()
+        self._parent = None
         self._handle = C.c_void_p()
         status = library._cancellation_create(C.byref(self._handle))
         if status != OK:
@@ -144,12 +147,41 @@ class Cancellation:
 
     def signal(self):
         with self._lock:
+            self._signaled = True
             if self._handle.value:
                 self._library._cancellation_signal(self._handle)
+            for child in tuple(self._children):
+                child.signal()
+
+    def child(self):
+        """A one-way linked signal: parent cancellation reaches this child.
+
+        The child can cancel its own calls without changing the caller's token.
+        Close the child when its scoped calls have drained.
+        """
+        child = Cancellation(self._library)
+        with self._lock:
+            if self._signaled or self._closing or not self._handle.value:
+                child.signal()
+            else:
+                child._parent = self
+                self._children.add(child)
+        return child
 
     def close(self):
+        parent = self._parent
+        if parent is not None:
+            with parent._lock:
+                parent._children.discard(self)
+                self._parent = None
         with self._condition:
             self._closing = True
+            if parent is not None and self._handle.value:
+                self._signaled = True
+                self._library._cancellation_signal(self._handle)
+            for child in tuple(self._children):
+                child.signal()
+            self._children.clear()
             while self._opening:
                 self._condition.wait()
             if self._handle.value:

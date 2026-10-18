@@ -110,7 +110,7 @@ func modelSet(t *testing.T, root string) (dir, moved string) {
 // anything changes, and a relative path, a file and a folder outside every
 // root are refused.
 func TestProtectModelFolder(t *testing.T) {
-	root := t.TempDir()
+	root := pidDir(t)
 	dir, moved := modelSet(t, root)
 	roots := []string{root}
 	if allowsOnly(t, moved) == nil {
@@ -121,7 +121,7 @@ func TestProtectModelFolder(t *testing.T) {
 	}
 
 	link := filepath.Join(dir, "linked")
-	junction(t, link, t.TempDir())
+	junction(t, link, pidDir(t))
 	before := descriptor(t, moved)
 	if err := ProtectModelFolder(dir, roots); !errors.Is(err, ErrNotModelFolder) {
 		t.Fatalf("a folder holding a junction: %v", err)
@@ -155,7 +155,7 @@ func TestProtectModelFolder(t *testing.T) {
 			t.Fatalf("%s: %v", bad, err)
 		}
 	}
-	if err := ProtectModelFolder(dir, []string{t.TempDir()}); !errors.Is(err, ErrNotModelFolder) {
+	if err := ProtectModelFolder(dir, []string{pidDir(t)}); !errors.Is(err, ErrNotModelFolder) {
 		t.Fatalf("a folder outside every root: %v", err)
 	}
 }
@@ -165,7 +165,7 @@ func TestProtectModelFolder(t *testing.T) {
 // a second name inside OA's own folders (a job result LinkResult made, JOB-A17)
 // is accepted.
 func TestProtectModelFolderHardLinks(t *testing.T) {
-	base := t.TempDir()
+	base := pidDir(t)
 	models := filepath.Join(base, "OA-models")
 	jobs := filepath.Join(base, "jobs")
 	outside := filepath.Join(base, "elsewhere")
@@ -230,7 +230,7 @@ func TestProtectModelFolderHardLinks(t *testing.T) {
 // subfolder already held cannot be renamed away for a junction, and the
 // folder the junction would name keeps its access.
 func TestProtectModelFolderSwapAfterScan(t *testing.T) {
-	base := t.TempDir()
+	base := pidDir(t)
 	dir, _ := modelSet(t, filepath.Join(base, "OA-models"))
 	target := filepath.Join(base, "target")
 	if err := os.MkdirAll(target, 0o700); err != nil {
@@ -275,7 +275,7 @@ func TestCheckModelsRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := t.TempDir()
+	base := pidDir(t)
 	plain := filepath.Join(base, "OA-models")
 	if err := os.MkdirAll(filepath.Join(plain, "video"), 0o700); err != nil {
 		t.Fatal(err)

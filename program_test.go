@@ -8,9 +8,20 @@ import (
 	"testing"
 )
 
+// The OS may spell TEMP through a DOS alias. Derive expected subjects from
+// the resolved existing parent, independently of the subject normalizer.
+func subjectProgramDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestSubjectProgramComparisonPreservesIdentityBoundaries(t *testing.T) {
-	one := filepath.Join(t.TempDir(), "one.exe")
-	two := filepath.Join(t.TempDir(), "one.exe")
+	one := filepath.Join(subjectProgramDir(t), "one.exe")
+	two := filepath.Join(subjectProgramDir(t), "one.exe")
 	if !SameSubjectProgram(one, one) || SameSubjectProgram(one, two) {
 		t.Fatal("path comparison lost file identity")
 	}
@@ -52,7 +63,7 @@ func TestPackageFamilyIgnoresVersionAndArchitecture(t *testing.T) {
 // identity, keeps its path, as does a caller without a package. The path must
 // meet the path proof.
 func TestSubjectProgramPrefersASignedPackageFamily(t *testing.T) {
-	installed := t.TempDir()
+	installed := subjectProgramDir(t)
 	image := filepath.Join(installed, "app", "app.exe")
 	saved := packageInstallPath
 	defer func() { packageInstallPath = saved }()
@@ -70,7 +81,7 @@ func TestSubjectProgramPrefersASignedPackageFamily(t *testing.T) {
 	if err != nil || got != "msix:Claude_pzs8sxrjxfjjc" || !ValidSubjectProgram(got) {
 		t.Fatalf("subject %q %v", got, err)
 	}
-	elsewhere := filepath.Join(t.TempDir(), "tool.exe")
+	elsewhere := filepath.Join(subjectProgramDir(t), "tool.exe")
 	peer.Path = attr("path", elsewhere, ProofBound, "fixture")
 	if got, err := SubjectProgram(peer, ProofBound); err != nil || got != elsewhere {
 		t.Fatalf("an image outside the package folder named %q %v", got, err)

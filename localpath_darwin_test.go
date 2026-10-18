@@ -3,12 +3,14 @@
 package identity
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -19,6 +21,18 @@ func markLocal(st *unix.Statfs_t) { st.Flags = unix.MNT_LOCAL }
 // [ID-F1] systemRootAliases reads every firmlink and every symbolic link in
 // the root folder.
 func TestSystemRootAliasesReadsFirmlinksAndRootLinks(t *testing.T) {
+	if os.Getenv("OA_IDENTITY_ROOT_ALIASES_HELPER") != "1" {
+		// A prior LocalPath call can leave a system alias reader in flight.
+		// Run only this fixture in a fresh test process before changing paths.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSystemRootAliasesReadsFirmlinksAndRootLinks$")
+		child.Env = append(os.Environ(), "OA_IDENTITY_ROOT_ALIASES_HELPER=1")
+		if out, err := child.CombinedOutput(); err != nil {
+			t.Fatalf("alias fixture: %v\n%s", err, out)
+		}
+		return
+	}
 	dir := t.TempDir()
 	list := filepath.Join(dir, "firmlinks")
 	if err := os.WriteFile(list, []byte("/Users\tUsers\n/usr/local\tusr/local\nbroken line\n"), 0o600); err != nil {
@@ -58,6 +72,23 @@ func TestSystemRootAliasesReadsFirmlinksAndRootLinks(t *testing.T) {
 		if got[from] != to {
 			t.Errorf("alias %s = %q, want %q", from, got[from], to)
 		}
+	}
+}
+
+// A mount refresh may still be reading system aliases when the next fixture
+// starts. Its system paths and the fixture's paths remain independent.
+func TestSystemRootAliasesFixtureDuringSystemRead(t *testing.T) {
+	start := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		<-start
+		_, err := systemRootAliases()
+		done <- err
+	}()
+	close(start)
+	t.Run("fixture", TestSystemRootAliasesReadsFirmlinksAndRootLinks)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

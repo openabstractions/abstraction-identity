@@ -43,6 +43,28 @@ func sameExecutable(t *testing.T, got string) bool {
 	return strings.EqualFold(a, b)
 }
 
+// The listener announcement precedes Accept. The connected descriptor must be
+// owned by the child before these tests ask the kernel to prove its holder.
+func waitLoopbackAccepted(t *testing.T, lines *bufio.Reader, conn net.Conn) {
+	t.Helper()
+	result := make(chan error, 1)
+	go func() {
+		line, err := lines.ReadString('\n')
+		if err == nil && line != "accepted "+conn.LocalAddr().String()+"\n" {
+			err = fmt.Errorf("child acceptance %q, want connection %s", line, conn.LocalAddr())
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("child did not acknowledge accepting this connection")
+	}
+}
+
 // An honest peer in this process is bound to this process, at the rung the
 // ceiling advertises, and stays bound across rechecks.
 func TestBindLoopbackNamesTheConnectingProcess(t *testing.T) {
@@ -99,7 +121,8 @@ func TestBindLoopbackServerNamesTheListeningChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
-	line, err := bufio.NewReader(stdout).ReadString('\n')
+	lines := bufio.NewReader(stdout)
+	line, err := lines.ReadString('\n')
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +136,7 @@ func TestBindLoopbackServerNamesTheListeningChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	waitLoopbackAccepted(t, lines, conn)
 	b, err := BindLoopbackServer(conn, &Options{ConnectedAt: time.Now(), SkipCodeSignature: true})
 	if err != nil {
 		t.Fatal(err)

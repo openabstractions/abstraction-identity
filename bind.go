@@ -2,6 +2,7 @@ package identity
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"syscall"
@@ -24,6 +25,15 @@ var (
 	// so that no successor can take its place. Ask [Binding.Alive] when
 	// liveness is what matters.
 	ErrPeerGone = errors.New("identity: there is no live peer to bind to")
+
+	// ErrPeerPending means an initial Linux loopback lookup found the
+	// kernel socket row but no descriptor holder before any process was
+	// observed or pinned. A dial can
+	// finish before the server accepts. No identity has been captured; a
+	// caller may wait within its existing context before trying this same
+	// connection again. It also matches ErrPeerGone. Other missing-peer,
+	// process-exit and binding-recheck failures do not match ErrPeerPending.
+	ErrPeerPending = fmt.Errorf("%w: no descriptor holder was observed for the connected socket", ErrPeerGone)
 
 	// ErrPeerMoved means the connection no longer answers for the process
 	// that was captured when it was accepted.

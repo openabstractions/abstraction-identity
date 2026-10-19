@@ -759,6 +759,15 @@ change of holder, or an exec into another image MUST be refused with
 `ErrNoBinding`. Binding a peer after the only process that connected has
 passed the socket names the process that now holds it.
 
+An initial lookup of an existing kernel socket row with no descriptor
+holder observed or pinned MUST answer `ErrPeerPending`, which also matches
+`ErrPeerGone`.
+The immediate bind does not wait or supply an identity. A caller may retry
+that same connection within its existing context before any request byte.
+A missing row, another uid, a failure after observing a holder (including
+process/pidfd failure), or binding recheck MUST
+NOT answer `ErrPeerPending`.
+
 **[ID-T5] macOS.** `BindLoopback` MUST always fail with `ErrNoBinding`,
 and `Bindable` MUST read false: the per-socket process record follows the
 most recent writer, the same defeat `ID-M1` measures for `AF_UNIX`, so

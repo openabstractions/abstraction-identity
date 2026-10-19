@@ -187,13 +187,18 @@ func bindLoopback(client, server netip.AddrPort, opts *Options) (binder, *Peer, 
 	if row.uid != os.Getuid() {
 		return nil, nil, fmt.Errorf("%w: the client socket belongs to uid %d; only same-uid descriptor tables can be read", ErrNoBinding, row.uid)
 	}
+	// Before accept associates the established kernel socket with a file,
+	// /proc reports inode zero. No descriptor scan can prove a holder then.
+	if row.established && row.inode == 0 {
+		return nil, nil, fmt.Errorf("%w: the established kernel socket has no descriptor inode", ErrPeerPending)
+	}
 	pids, err := holders(row.inode, row.uid)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: scanning /proc: %v", ErrNoBinding, err)
 	}
 	switch {
 	case len(pids) == 0:
-		return nil, nil, fmt.Errorf("%w: no process of uid %d holds the client socket", ErrPeerGone, row.uid)
+		return nil, nil, fmt.Errorf("%w: no process of uid %d holds the client socket", ErrPeerPending, row.uid)
 	case len(pids) > 1:
 		return nil, nil, fmt.Errorf("%w: processes %v all hold the client socket; a passed or inherited socket names no single program", ErrPeerMoved, pids)
 	}

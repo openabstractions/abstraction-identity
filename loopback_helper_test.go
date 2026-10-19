@@ -44,11 +44,18 @@ func runLoopbackServer() int {
 		return 1
 	}
 	fmt.Printf("server %d %s\n", os.Getpid(), l.Addr())
+	gate := bufio.NewReader(os.Stdin)
 	for {
+		if os.Getenv(loopbackServerEnv) == "gated" {
+			if line, err := gate.ReadString('\n'); err != nil || line != "accept\n" {
+				return 1
+			}
+		}
 		c, err := l.Accept()
 		if err != nil {
 			return 1
 		}
+		fmt.Printf("accepted %s\n", c.RemoteAddr())
 		go func() {
 			defer c.Close()
 			time.Sleep(60 * time.Second)

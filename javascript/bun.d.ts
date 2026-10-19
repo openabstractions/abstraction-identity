@@ -1,4 +1,4 @@
-import type {FrameOptions, FrameTransport, SelectionOptions, ServerExpectation} from './index.js';
+import type {ActivationOutcome, FrameOptions, FrameTransport, SelectionOptions, ServerExpectation} from './index.js';
 
 /** The shared C ABI library this connector opens, resolved before any native use. */
 export declare function libraryPath(): string;
@@ -10,6 +10,7 @@ export declare class BunNativeConnector {
   runtimeEndpoint(): string;
   /** The installed runtime's identity from the shared native selector. */
   selectRuntime(options?: SelectionOptions): Promise<Readonly<ServerExpectation>>;
+  activateRuntime(expected: ServerExpectation, options?: SelectionOptions): Promise<ActivationOutcome>;
 }
 
 export declare class BunFrameTransport implements FrameTransport {

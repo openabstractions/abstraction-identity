@@ -3,7 +3,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
-from abstraction.ipc import Library, Cancellation, FrameTransport, FrameError, CANCELLED, INVALID_ARGUMENT, IO_ERROR, ServerExpectation, UNTRUSTED, PROOF_UNAVAILABLE
+from abstraction.ipc import Library, Cancellation, FrameTransport, FrameError, CANCELLED, INVALID_ARGUMENT, IO_ERROR, OPEN_IO_ERROR, ServerExpectation, UNTRUSTED, PROOF_UNAVAILABLE
 
 
 class Native:
@@ -24,7 +24,10 @@ class Native:
         assert not self.in_open
         self.release_count += 1
 
-    def _open_cancelable(self, endpoint, length, millis, token, out):
+    def _features(self):
+        return 4
+
+    def _session_call(self, endpoint, length, millis, token, expected, frame, size, limit, flags, out, sent):
         self.in_open = True
         self.opened.set()
         assert self.signalled.wait(2)
@@ -176,7 +179,8 @@ class TransportTests(unittest.TestCase):
         server=ServerExpectation(2,"123","/installed/runtime")
         seen=[]
         class Verified:
-            def _open_verified(self, endpoint,length,millis,signal,expected,out):
+            def _features(self): return 4
+            def _session_call(self, endpoint,length,millis,signal,expected,frame,size,limit,flags,out,sent):
                 value=expected._obj
                 seen.append((value.version,value.principal_kind,value.principal,value.program))
                 return UNTRUSTED
@@ -263,22 +267,79 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, INVALID_ARGUMENT)
         self.assertFalse(native.opened.is_set())
 
-    def test_partial_write_failure_preserves_count_and_closes_once(self):
+    def test_native_failure_preserves_payload_count_and_releases_reply_once(self):
         class Partial:
             def __init__(self): self.closes = 0
-            def _open_cancelable(self, ep, n, ms, token, out):
-                out._obj.value = 1
-                return 0
-            def _write(self, h, buf, n, moved):
-                moved._obj.value = 3
+            def _features(self): return 4
+            def _session_call(self, ep,n,ms,token,expected,frame,size,limit,flags,out,sent):
+                self.flags = flags
+                out._obj.value = 9
+                sent._obj.value = 2
                 return IO_ERROR
-            def _close(self, h): self.closes += 1
+            def _reply_release(self, h): self.closes += 1
         native = Partial()
         with self.assertRaises(FrameError) as caught:
             FrameTransport(native, "endpoint").exchange_frame(b"abc")
-        self.assertEqual(caught.exception.transferred, 3)
+        self.assertEqual(caught.exception.transferred, 2)
         self.assertEqual(caught.exception.status, IO_ERROR)
         self.assertEqual(native.closes, 1)
+        self.assertEqual(native.flags, 2)
+
+    def test_ordinary_calls_require_feature_before_native_io(self):
+        class Old:
+            def _session_call(self, *args): raise AssertionError("old library received payload")
+            def _open_cancelable(self, *args): raise AssertionError("raw stream reached")
+        for feature in (None, lambda: 0, lambda: 1):
+            native = Old()
+            native._features = feature
+            for operation in ("exchange_frame", "write_frame"):
+                with self.assertRaises(FrameError) as caught:
+                    getattr(FrameTransport(native, "endpoint"), operation)(b"")
+                self.assertEqual(caught.exception.status, PROOF_UNAVAILABLE)
+
+    def test_open_phase_opt_in_and_typed_status_are_projected_without_count_inference(self):
+        calls = []
+        class Native:
+            def _features(self): return features
+            def _session_call(self, ep,n,ms,token,expected,frame,size,limit,flags,out,sent):
+                calls.append(flags)
+                sent._obj.value = 0
+                return status
+        for features in (4, 12):
+            for sessions in (False, True):
+                for status in ((IO_ERROR, OPEN_IO_ERROR) if features & 8 else (IO_ERROR,)):
+                    with self.subTest(features=features, sessions=sessions, status=status):
+                        with self.assertRaises(FrameError) as caught:
+                            FrameTransport(Native(), "endpoint", sessions=sessions).exchange_frame(b"")
+                        self.assertEqual(caught.exception.status, status)
+                        self.assertEqual(caught.exception.transferred, 0)
+                        self.assertEqual(calls[-1], (0 if sessions else 2) | (4 if features & 8 else 0))
+
+    def test_single_exchange_flags_empty_binary_and_unknown_empty_failure(self):
+        class Framed:
+            calls = []
+            status = 0
+            buffer = C.create_string_buffer(b"\0\xff")
+            def _features(self): return 4
+            def _session_call(self, ep,n,ms,token,expected,frame,size,limit,flags,out,sent):
+                self.calls.append((frame,size,flags,limit))
+                if self.status: return self.status
+                if flags == 2: out._obj.value = 9
+                return 0
+            def _reply_data(self, reply, length):
+                length._obj.value = 2
+                return C.addressof(self.buffer)
+            def _reply_release(self, reply): pass
+        native = Framed()
+        transport = FrameTransport(native, "endpoint", max_frame=16)
+        self.assertEqual(transport.exchange_frame(b""), b"\0\xff")
+        transport.write_frame(b"\0\xff")
+        self.assertEqual(native.calls[:2], [(b"",0,2,16),(b"\0\xff",2,3,16)])
+        native.status = IO_ERROR
+        with self.assertRaises(FrameError) as caught: transport.exchange_frame(b"")
+        self.assertEqual(caught.exception.transferred, 0)
+        self.assertIn("acceptance may be unknown", str(caught.exception))
+        self.assertNotIn("IPC open failed", str(caught.exception))
 
     def test_sessions_use_the_shared_session_call_with_trust_and_flags(self):
         server = ServerExpectation(2, "123", "/installed/runtime")
@@ -308,15 +369,10 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(seen, [(b"endpoint", b"123", b"/installed/runtime", b"ask", 64, 0), ("released", 99)] * 3 +
                          [(b"endpoint", b"123", b"/installed/runtime", b"tell", 64, 1)])
 
-    def test_sessions_fall_back_to_a_connection_per_call_on_an_older_library(self):
-        native = Native()
-        token = Cancellation(native)
-        with token:
-            token.signal()
-            with self.assertRaises(FrameError) as caught:
-                FrameTransport(native, "endpoint", cancellation=token, sessions=True).exchange_frame(b"x")
-        self.assertEqual(caught.exception.status, CANCELLED)
-        self.assertTrue(native.opened.is_set())
+    def test_missing_framed_entrypoint_refuses_without_raw_stream_fallback(self):
+        with self.assertRaises(FrameError) as caught:
+            FrameTransport(object(), "endpoint", sessions=True).exchange_frame(b"x")
+        self.assertEqual(caught.exception.status, PROOF_UNAVAILABLE)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ func BindServer(h Handle, opts *Options) (*Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Binding{peer: peer, boundAt: time.Now(), inner: inner}, nil
+	return &Binding{peer: peer, boundAt: time.Now(), inner: &bindingState{inner: inner}}, nil
 }
 
 // BindServerConn is BindServer for a connection exposing syscall.Conn.

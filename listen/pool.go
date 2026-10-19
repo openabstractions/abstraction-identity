@@ -340,3 +340,7 @@ func (c FrameClient) dialSession(ctx context.Context) (*serverConn, error) {
 	}
 	return guard, nil
 }
+
+// CallerClosed reports whether err from replying to a call means the caller
+// had already closed its end, so the reply had nowhere to go.
+func CallerClosed(err error) bool { return err != nil && writeSignalsClosedPeer(err) }

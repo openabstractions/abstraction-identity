@@ -6,20 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"golang.org/x/sys/windows"
 )
 
+var serverQueries = serverQueryLeases{open: openServerQueryTargets}
+
 // AdmitServerQueries lets named AppContainers establish this process's existing
-// native server proof. It grants only process limited-query and token query on
+// native server proof. It grants process limited-query and synchronize (the
+// held-process liveness wait), and token query on
 // this process, retains mandatory labels, and restores its own DACL effects.
 // The uncontained server supplies validated installation SIDs, never a caller.
+// Overlapping admissions retain each SID until its final lease is released.
+// A failed release retains its recovery state and may be retried.
 func AdmitServerQueries(containers ...string) (func() error, error) {
 	if len(containers) == 0 {
 		return nil, errors.New("identity: server query admission requires containers")
 	}
-	sids := make([]*windows.SID, 0, len(containers))
+	names := make([]string, 0, len(containers))
 	seen := make(map[string]bool)
 	for _, value := range containers {
 		sid, err := windows.StringToSid(value)
@@ -31,8 +35,14 @@ func AdmitServerQueries(containers ...string) (func() error, error) {
 			return nil, fmt.Errorf("identity: not one unique AppContainer SID: %s", value)
 		}
 		seen[value] = true
-		sids = append(sids, sid)
+		names = append(names, value)
 	}
+	return serverQueries.acquire(names)
+}
+
+type nativeServerQueryTargets struct{ handles [2]windows.Handle }
+
+func openServerQueryTargets() (serverQueryTargets, error) {
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.READ_CONTROL|windows.WRITE_DAC, false, windows.GetCurrentProcessId())
 	if err != nil {
 		return nil, err
@@ -42,65 +52,80 @@ func AdmitServerQueries(containers ...string) (func() error, error) {
 		windows.CloseHandle(process)
 		return nil, err
 	}
-	type effect struct {
-		handle  windows.Handle
-		before  *windows.SECURITY_DESCRIPTOR
-		applied string
+	return &nativeServerQueryTargets{handles: [2]windows.Handle{process, windows.Handle(token)}}, nil
+}
+
+func (t *nativeServerQueryTargets) read(i int) (string, error) {
+	sd, err := windows.GetSecurityInfo(t.handles[i], windows.SE_KERNEL_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return "", err
 	}
-	var effects []effect
-	var once sync.Once
-	var closeErr error
-	close := func() error {
-		once.Do(func() {
-			for i := len(effects) - 1; i >= 0; i-- {
-				e := effects[i]
-				current, err := windows.GetSecurityInfo(e.handle, windows.SE_KERNEL_OBJECT, windows.DACL_SECURITY_INFORMATION)
-				if err != nil || current.String() != e.applied {
-					closeErr = errors.Join(closeErr, fmt.Errorf("identity: server query ACL changed before restoration: %v", err))
-					continue
-				}
-				acl, _, err := e.before.DACL()
-				if err == nil {
-					err = windows.SetSecurityInfo(e.handle, windows.SE_KERNEL_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
-				}
-				closeErr = errors.Join(closeErr, err)
+	acl, _, err := sd.DACL()
+	if err != nil || acl == nil {
+		return "", errors.Join(errors.New("identity: server query admission requires an existing DACL"), err)
+	}
+	return sd.String(), nil
+}
+
+func (t *nativeServerQueryTargets) compose(i int, baseline string, names []string) (string, error) {
+	sd, err := windows.SecurityDescriptorFromString(baseline)
+	if err != nil {
+		return "", err
+	}
+	old, _, err := sd.DACL()
+	if err != nil {
+		return "", err
+	}
+	sids := make([]*windows.SID, 0, len(names))
+	for _, name := range names {
+		sid, err := windows.StringToSid(name)
+		if err != nil {
+			return "", err
+		}
+		sids = append(sids, sid)
+	}
+	mask := windows.ACCESS_MASK(windows.TOKEN_QUERY)
+	if i == 0 {
+		mask = windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.SYNCHRONIZE
+	}
+	acl, err := windows.ACLFromEntries(serverQueryEntries(sids, mask), old)
+	if err != nil {
+		return "", err
+	}
+	absolute, err := sd.ToAbsolute()
+	if err != nil {
+		return "", err
+	}
+	if err = absolute.SetDACL(acl, true, false); err != nil {
+		return "", err
+	}
+	return absolute.String(), nil
+}
+
+func (t *nativeServerQueryTargets) write(i int, descriptor string) error {
+	sd, err := windows.SecurityDescriptorFromString(descriptor)
+	if err != nil {
+		return err
+	}
+	acl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(t.handles[i], windows.SE_KERNEL_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+}
+
+func (t *nativeServerQueryTargets) close() error {
+	var result error
+	for i := len(t.handles) - 1; i >= 0; i-- {
+		if t.handles[i] != 0 {
+			err := windows.CloseHandle(t.handles[i])
+			result = errors.Join(result, err)
+			if err == nil {
+				t.handles[i] = 0
 			}
-			closeErr = errors.Join(closeErr, token.Close(), windows.CloseHandle(process))
-		})
-		return closeErr
+		}
 	}
-	for _, target := range []struct {
-		handle windows.Handle
-		mask   windows.ACCESS_MASK
-	}{
-		{process, windows.PROCESS_QUERY_LIMITED_INFORMATION}, {windows.Handle(token), windows.TOKEN_QUERY},
-	} {
-		before, err := windows.GetSecurityInfo(target.handle, windows.SE_KERNEL_OBJECT, windows.DACL_SECURITY_INFORMATION)
-		if err != nil {
-			return nil, errors.Join(err, close())
-		}
-		old, _, err := before.DACL()
-		if err != nil || old == nil {
-			return nil, errors.Join(errors.New("identity: server query admission requires an existing DACL"), err, close())
-		}
-		acl, err := windows.ACLFromEntries(serverQueryEntries(sids, target.mask), old)
-		if err != nil {
-			return nil, errors.Join(err, close())
-		}
-		if err := windows.SetSecurityInfo(target.handle, windows.SE_KERNEL_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
-			return nil, errors.Join(err, close())
-		}
-		// Record the applied descriptor even when its subsequent read fails;
-		// restore through the still-open object before returning failure.
-		applied, err := windows.GetSecurityInfo(target.handle, windows.SE_KERNEL_OBJECT, windows.DACL_SECURITY_INFORMATION)
-		if err != nil {
-			original, _, originalErr := before.DACL()
-			restoreErr := windows.SetSecurityInfo(target.handle, windows.SE_KERNEL_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, original, nil)
-			return nil, errors.Join(err, originalErr, restoreErr, close())
-		}
-		effects = append(effects, effect{target.handle, before, applied.String()})
-	}
-	return close, nil
+	return result
 }
 
 func serverQueryEntries(sids []*windows.SID, mask windows.ACCESS_MASK) []windows.EXPLICIT_ACCESS {

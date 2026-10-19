@@ -1,7 +1,34 @@
 cmake_minimum_required(VERSION 3.16)
-project(abstraction_ipc VERSION 0.1.0 LANGUAGES C CXX)
+project(abstraction_ipc VERSION 0.8.0 LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+find_package(Threads REQUIRED)
+# Local path identity has no IPC, runtime selection or AppModel dependency.
+add_library(abstraction_fileid STATIC src/fileid_private.cpp)
+add_library(abstraction::fileid ALIAS abstraction_fileid)
+set_target_properties(abstraction_fileid PROPERTIES EXPORT_NAME fileid POSITION_INDEPENDENT_CODE ON)
+target_compile_features(abstraction_fileid PUBLIC cxx_std_17)
+target_include_directories(abstraction_fileid PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_link_libraries(abstraction_fileid PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+install(TARGETS abstraction_fileid EXPORT abstraction_fileidTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+set(fileid_config_dir ${CMAKE_INSTALL_LIBDIR}/cmake/abstraction_fileid)
+install(EXPORT abstraction_fileidTargets NAMESPACE abstraction:: DESTINATION ${fileid_config_dir})
+configure_package_config_file(cmake/abstraction_fileidConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/abstraction_fileidConfig.cmake INSTALL_DESTINATION ${fileid_config_dir})
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/abstraction_fileidConfigVersion.cmake
+    COMPATIBILITY SameMajorVersion)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/abstraction_fileidConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/abstraction_fileidConfigVersion.cmake DESTINATION ${fileid_config_dir})
+set(fileid_platform_libs "${CMAKE_THREAD_LIBS_INIT}")
+foreach(library IN LISTS CMAKE_DL_LIBS)
+    string(APPEND fileid_platform_libs " -l${library}")
+endforeach()
+configure_file(cmake/abstraction_fileid.pc.in abstraction_fileid.pc @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/abstraction_fileid.pc
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 set(abstraction_ipc_sources src/client.cpp)
 if(APPLE)
     list(APPEND abstraction_ipc_sources ../xpc_native_darwin.c)
@@ -47,8 +74,11 @@ function(configure_abstraction_ipc target)
             message(FATAL_ERROR "link-dependencies.txt: unknown kind ${link_kind}")
         endif()
     endforeach()
+    # The headers, and beside them the transport constants scripts/generate.targets
+    # writes from identity.thrift (abstraction/ipc/constants/rec.h).
     target_include_directories(${target} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
     target_compile_definitions(${target} PRIVATE ABSTRACTION_IPC_BUILD)
 endfunction()
@@ -77,6 +107,7 @@ install(TARGETS abstraction_ipc EXPORT abstraction_ipcTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES abstraction/ipc/constants/rec.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/abstraction/ipc/constants)
 install(FILES link-dependencies.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/abstraction_ipc)
 set(config_dir ${CMAKE_INSTALL_LIBDIR}/cmake/abstraction_ipc)
 install(EXPORT abstraction_ipcTargets NAMESPACE abstraction:: DESTINATION ${config_dir})
@@ -90,6 +121,14 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/abstraction_ipcConfig.cmake
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     option(ABSTRACTION_IPC_BUILD_TESTS "Build local C consumer tests" ON)
     if(ABSTRACTION_IPC_BUILD_TESTS)
+        # Private migration conformance adapter, exercised by the existing Go
+        # placetest factory through OA_FILEID_NATIVE_TEST. It is never installed.
+        add_executable(fileid_conformance test/fileid_conformance.cpp)
+        target_include_directories(fileid_conformance PRIVATE src)
+        target_compile_features(fileid_conformance PRIVATE cxx_std_17)
+        target_link_libraries(fileid_conformance PRIVATE abstraction::fileid)
+        add_executable(fileid_read_policy test/fileid_read_policy.cpp)
+        target_link_libraries(fileid_read_policy PRIVATE abstraction::fileid)
         # Recompile the same sources with private transport seams for this test.
         # The installed abstraction_ipc target stays independent of test options.
         add_library(abstraction_ipc_session_test STATIC ${abstraction_ipc_sources})
@@ -119,6 +158,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_features(ipc_server_trust PRIVATE cxx_std_17)
         target_link_libraries(ipc_server_trust PRIVATE abstraction::ipc Threads::Threads)
         enable_testing()
+        add_test(NAME FileIDReadPolicy COMMAND fileid_read_policy)
+        set_tests_properties(FileIDReadPolicy PROPERTIES SKIP_RETURN_CODE 77)
+        add_subdirectory(test/fileid_probe)
+        add_executable(ipc_current_principal test/current_principal/main.cpp)
+        target_compile_features(ipc_current_principal PRIVATE cxx_std_17)
+        target_link_libraries(ipc_current_principal PRIVATE abstraction::ipc)
+        add_test(NAME CurrentPrincipal COMMAND ipc_current_principal)
+        set_tests_properties(CurrentPrincipal PROPERTIES TIMEOUT 10)
         add_executable(ipc_runtime_selection test/runtime_selection/main.cpp)
         target_compile_features(ipc_runtime_selection PRIVATE cxx_std_17)
         target_link_libraries(ipc_runtime_selection PRIVATE abstraction::ipc Threads::Threads)
@@ -129,6 +176,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_features(ipc_session_client PRIVATE cxx_std_17)
         target_compile_definitions(ipc_session_client PRIVATE ABSTRACTION_IPC_TEST_HOOKS)
         target_link_libraries(ipc_session_client PRIVATE abstraction_ipc_session_test Threads::Threads)
+        add_executable(ipc_server_guard_order test/server_guard_order/main.cpp)
+        target_compile_features(ipc_server_guard_order PRIVATE cxx_std_17)
+        target_compile_definitions(ipc_server_guard_order PRIVATE ABSTRACTION_IPC_TEST_HOOKS NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_link_libraries(ipc_server_guard_order PRIVATE abstraction_ipc_session_test Threads::Threads)
+        add_test(NAME ServerGuardOrder COMMAND ipc_server_guard_order)
+        set_tests_properties(ServerGuardOrder PROPERTIES TIMEOUT 10)
         add_test(NAME FrameErrors COMMAND ipc_frame_errors)
         set_tests_properties(FrameErrors PROPERTIES TIMEOUT 10)
         add_test(NAME SessionClient COMMAND ipc_session_client)

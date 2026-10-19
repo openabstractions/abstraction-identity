@@ -4,6 +4,7 @@
 #include <abstraction/ipc/client.h>
 #include <cstdlib>
 #include <map>
+#include <vector>
 #include <linux/sched.h>
 #include <signal.h>
 #include <sys/syscall.h>
@@ -32,8 +33,9 @@ struct Child {
     }
 };
 
-inline oa_ipc_status query(std::string& out, local_stream::Deadline deadline,
-    local_stream::Cancellation* cancel, const char* executable="/usr/bin/systemctl") {
+inline oa_ipc_status run_owned(std::string& out,int& exit_code,local_stream::Deadline deadline,
+    local_stream::Cancellation* cancel,const char* executable,const std::vector<std::string>& arguments,
+    int executable_fd=-1,bool require_eof=true,bool discard_overflow=false) {
     auto state=budget(deadline,cancel);if(state!=OA_IPC_OK)return state;
     int pipes[2];if(::pipe2(pipes,O_CLOEXEC))return OA_IPC_IO_ERROR;
     if(::fcntl(pipes[0],F_SETFL,O_NONBLOCK)<0){::close(pipes[0]);::close(pipes[1]);return OA_IPC_IO_ERROR;}
@@ -43,8 +45,10 @@ inline oa_ipc_status query(std::string& out, local_stream::Deadline deadline,
         ::close(fd);fd=replacement;
     }
     Child child;child.reader=pipes[0];
-    const char* args[]={executable,"--user","show","abstraction-runtime.service",
-        "--property=LoadState,ExecStart,User","--no-pager",nullptr};
+    std::vector<char*> args;args.reserve(arguments.size()+2);
+    args.push_back(const_cast<char*>(executable));
+    for(const auto& argument:arguments)args.push_back(const_cast<char*>(argument.c_str()));
+    args.push_back(nullptr);
     clone_args options{};
     options.flags=CLONE_PIDFD;options.exit_signal=SIGCHLD;
     options.pidfd=reinterpret_cast<uint64_t>(&child.handle);
@@ -52,7 +56,8 @@ inline oa_ipc_status query(std::string& out, local_stream::Deadline deadline,
     if(spawned==0) {
         if(::dup2(pipes[1],STDOUT_FILENO)<0 || ::dup2(pipes[1],STDERR_FILENO)<0)::_exit(127);
         ::close(pipes[0]);::close(pipes[1]);
-        ::execve(executable,const_cast<char* const*>(args),environ);
+        if(executable_fd>=0)::syscall(SYS_execveat,executable_fd,"",args.data(),environ,AT_EMPTY_PATH);
+        else ::execve(executable,args.data(),environ);
         ::_exit(127);
     }
     ::close(pipes[1]);
@@ -63,10 +68,11 @@ inline oa_ipc_status query(std::string& out, local_stream::Deadline deadline,
         if(!eof) {
             char buffer[4096];const auto count=::read(child.reader,buffer,sizeof buffer);
             if(count>0) {
-                if(out.size()+static_cast<size_t>(count)>65536)return OA_IPC_UNTRUSTED;
-                out.append(buffer,static_cast<size_t>(count));continue;
+                if(out.size()+static_cast<size_t>(count)>65536) {
+                    if(!discard_overflow)return OA_IPC_UNTRUSTED;
+                }else out.append(buffer,static_cast<size_t>(count));
             }
-            if(count==0)eof=true;
+            else if(count==0)eof=true;
             else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return OA_IPC_IO_ERROR;
         }
         siginfo_t info{};
@@ -74,13 +80,23 @@ inline oa_ipc_status query(std::string& out, local_stream::Deadline deadline,
             if(errno==EINTR)continue;
             return OA_IPC_IO_ERROR;
         }
-        if(eof && info.si_pid) {
-            if(info.si_code!=CLD_EXITED || info.si_status!=0)return OA_IPC_UNTRUSTED;
+        if(info.si_pid && (eof||!require_eof)) {
+            if(info.si_code!=CLD_EXITED)return OA_IPC_IO_ERROR;
+            exit_code=info.si_status;
             return budget(deadline,cancel);
         }
         pollfd fds[3]{{eof?-1:child.reader,POLLIN,0},{cancel?cancel->wake():-1,POLLIN,0},{info.si_pid?-1:child.handle,POLLIN,0}};
         if(::poll(fds,3,local_stream::detail::remaining_ms(deadline))<0 && errno!=EINTR)return OA_IPC_IO_ERROR;
     }
+}
+
+inline oa_ipc_status query(std::string& out, local_stream::Deadline deadline,
+    local_stream::Cancellation* cancel, const char* executable="/usr/bin/systemctl") {
+    int code=-1;
+    auto state=run_owned(out,code,deadline,cancel,executable,{"--user","show","abstraction-runtime.service",
+        "--property=LoadState,ExecStart,User","--no-pager"});
+    if(state!=OA_IPC_OK)return state;
+    return code==0?OA_IPC_OK:OA_IPC_UNTRUSTED;
 }
 
 inline bool decode_path(const std::string& text,std::string& out) {

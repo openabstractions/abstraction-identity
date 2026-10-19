@@ -9,6 +9,21 @@ extern const char* fixture_program(void);
 extern size_t fixture_handles(void);
 extern void fixture_cancel_after(oa_ipc_cancellation* cancellation);
 extern void fixture_cancel_join(void);
+extern const char* fixture_link_self(void);
+extern const char* fixture_rename(const char* from);
+extern int fixture_copy_self_to(const char* name);
+extern void fixture_identity_cleanup(void);
+
+static oa_ipc_status open_as(oa_ipc_server_expectation expected, const char* program) {
+    oa_ipc_connection* connection = NULL;
+    expected.program = program;
+    expected.program_length = strlen(program);
+    const char* endpoint = fixture_begin(0);
+    oa_ipc_status status = oa_ipc_open_verified(endpoint,strlen(endpoint),1000,NULL,&expected,&connection);
+    if (connection) oa_ipc_close(connection);
+    fixture_finish();
+    return status;
+}
 
 #define CHECK(condition) do { if (!(condition)) { fprintf(stderr,"failed at line %d: %s\n",__LINE__,#condition); return 1; } } while(0)
 
@@ -61,6 +76,23 @@ int main(void) {
     oa_ipc_close(connection);
     CHECK(fixture_finish() == 7);
 
+    /* PT-5a: the image is matched by file identity. Another name for the
+       running image (a hard link, then that link renamed) keeps the check;
+       a different file placed at a name the expectation uses fails it. */
+    {
+        char link[32769], moved[32769];
+        const char* made = fixture_link_self();
+        CHECK(made != NULL);
+        strcpy(link, made);
+        int ok = open_as(expected, link) == OA_IPC_OK;
+        made = ok ? fixture_rename(link) : NULL;
+        if (made) strcpy(moved, made);
+        ok = ok && made && open_as(expected, moved) == OA_IPC_OK;
+        ok = ok && fixture_copy_self_to(link) && open_as(expected, link) == OA_IPC_UNTRUSTED;
+        fixture_identity_cleanup();
+        CHECK(ok);
+    }
+
     /* After warmup, repeated refusals and ordinary closure release retained
        process handles/pidfds as well as connection and fixture handles. */
     const size_t handles = fixture_handles();
@@ -109,7 +141,7 @@ int main(void) {
     oa_ipc_close(connection);
     CHECK(fixture_finish() == 0);
     CHECK(fixture_handles() == handles);
-    puts("PASS: installed C ABI verified open, exact bytes, zero-byte refusals, cancellation, deadline, retained-handle cleanup");
+    puts("PASS: installed C ABI verified open, exact bytes, zero-byte refusals, cancellation, deadline, retained-handle cleanup, image by file identity");
     return 0;
 #endif
 }

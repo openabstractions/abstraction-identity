@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: abstraction_fileid
+Description: Current-process local path identity and physical containment
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -labstraction_fileid @fileid_platform_libs@
+Cflags: -I${includedir}

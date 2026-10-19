@@ -9,6 +9,9 @@
 # copy. check_link_dependencies.py fails when any consumer diverges from it.
 windows system advapi32
 windows system msi
+windows system shell32
+windows system ole32
+windows system uuid
 linux cxx-runtime stdc++
 macos cxx-runtime c++
 macos framework Security

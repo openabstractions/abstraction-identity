@@ -3,6 +3,8 @@
 package privatedir
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -43,5 +45,55 @@ func TestThePrivateFolderDescriptorRule(t *testing.T) {
 		if (err == nil) != c.pass {
 			t.Fatalf("%s: %v, wanted pass=%v", name, err, c.pass)
 		}
+	}
+}
+
+func TestCheckFileWindowsActualDescriptor(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private")
+	if err := Ensure(root); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "state.json")
+	if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckFile(path); err != nil {
+		t.Fatalf("safe inherited file: %v", err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, _, err := sd.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED != 0 {
+		t.Fatalf("fixture must exercise inherited CAS-style DACL: %v", err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignOwner, err := windows.SecurityDescriptorFromString("O:SYD:(A;;FA;;;" + user.User.Sid.String() + ")(A;;FA;;;SY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = checkOwnerDescriptor(foreignOwner, user.User.Sid, false); err == nil {
+		t.Fatal("foreign owner accepted")
+	}
+	unsafeSD, err := windows.SecurityDescriptorFromString("O:" + user.User.Sid.String() + "D:P(A;;FA;;;" + user.User.Sid.String() + ")(A;;FA;;;SY)(A;;FR;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := unsafeSD.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = CheckDir(root); err != nil {
+		t.Fatalf("parent must remain private: %v", err)
+	}
+	if err = CheckFile(path); err == nil {
+		t.Fatal("foreign read ACE accepted under private parent")
 	}
 }

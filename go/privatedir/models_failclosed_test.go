@@ -11,7 +11,7 @@ import (
 	identity "github.com/openabstractions/abstraction-identity"
 )
 
-// ID-D3 with ID-F1: a models root identity refuses is refused before any
+// ID-D3 with ID-F9: a models root identity refuses is refused before any
 // comparison, and an identity error in the home check reads as "may hold",
 // never as "does not hold". under never counts a root it could not compare.
 func TestModelsRootFailsClosedOnRefusedVolume(t *testing.T) {

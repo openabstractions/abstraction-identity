@@ -15,3 +15,12 @@ func CheckFile(path string, owners Owners) error {
 
 // CheckExecutable refuses every path outside Windows too.
 func CheckExecutable(path string, owners Owners) error { return CheckFile(path, owners) }
+
+// CheckFileWithin refuses every path outside Windows too.
+func CheckFileWithin(path, root string, owners Owners) error { return CheckFile(path, owners) }
+
+// CheckFolderWithin refuses every path outside Windows too.
+func CheckFolderWithin(root string, owners Owners) error { return CheckFile(root, owners) }
+
+// ForeignCapabilities lists nothing outside Windows.
+func ForeignCapabilities(root string) []string { return nil }

@@ -1,6 +1,7 @@
 import {createRequire} from 'node:module';
 import {isAbsolute} from 'node:path';
 import {FrameError, Status} from './index.js';
+import * as ipc from './js/abstraction/ipc/constants/index.mjs';
 import {platformFile, platformIdentity, platformLibrary, platformPackage} from './platform.js';
 
 let installed;
@@ -157,7 +158,7 @@ export class BunNativeConnector {
    * Go, C++, Python and Node defaults use. Missing or ambiguous installation
    * rejects with Status.Untrusted; unsupported facilities with Status.ProofUnavailable.
    */
-  async selectRuntime({timeout = 5000, deadline = null, cancellation = null} = {}) {
+  async selectRuntime({timeout = ipc.ipcDefaultCallBudgetMs, deadline = null, cancellation = null} = {}) {
     if (!Number.isFinite(timeout) || timeout < 0 || timeout > 0xffffffff ||
         (deadline !== null && !Number.isFinite(deadline)) || !validCancellation(cancellation)) {
       throw new TypeError('invalid selection waiting');
@@ -167,6 +168,19 @@ export class BunNativeConnector {
     if (!validExpectation(server)) throw new FrameError(Status.InternalError, 'invalid native runtime identity');
     return freezeExpectation(server);
   }
+  async activateRuntime(expected, {timeout = ipc.ipcDefaultCallBudgetMs, deadline = null, cancellation = null} = {}) {
+    if (!validExpectation(expected) || !Number.isFinite(timeout) || timeout < 0 || timeout > 0xffffffff ||
+        (deadline !== null && !Number.isFinite(deadline)) || !validCancellation(cancellation))
+      throw new TypeError('invalid activation request');
+    const end=deadline ?? performance.now()+timeout;
+    const result = await bounded(end, cancellation,
+      {op:'activate',server:freezeExpectation(expected)});
+    if(cancellation?.aborted)throw new FrameError(Status.Cancelled,'waiting cancelled');
+    if(performance.now()>=end)throw new FrameError(Status.Timeout,'runtime activation deadline expired');
+    if (![1,2,3,4].includes(result.outcome))
+      throw new FrameError(Status.InternalError,'invalid native activation outcome');
+    return result.outcome;
+  }
 }
 
 export class BunFrameTransport {
@@ -174,12 +188,12 @@ export class BunFrameTransport {
    * A server expectation is enforced by the shared library on every call, before
    * any application byte is sent. XPC endpoints require one.
    */
-  constructor(endpoint, {timeout = 5000, deadline = null, cancellation = null,
-    maxFrame = 1048576, server = null, sessions = false} = {}) {
+  constructor(endpoint, {timeout = ipc.ipcDefaultCallBudgetMs, deadline = null, cancellation = null,
+    maxFrame = ipc.ipcDefaultMaxFrame, server = null, sessions = false} = {}) {
     if (typeof endpoint !== 'string' || !endpoint || endpoint.includes('\0') ||
         !Number.isFinite(timeout) || timeout < 0 || timeout > 0xffffffff ||
         (deadline !== null && !Number.isFinite(deadline)) ||
-        !Number.isInteger(maxFrame) || maxFrame < 1 || maxFrame > 2097152 ||
+        !Number.isInteger(maxFrame) || maxFrame < 1 || maxFrame > ipc.ipcClientMaxFrame ||
         !validCancellation(cancellation) || typeof sessions !== 'boolean') {
       throw new TypeError('invalid frame binding');
     }
@@ -213,7 +227,7 @@ export class BunFrameTransport {
       throw new FrameError(Status.InvalidArgument, 'frame must be bounded Uint8Array');
     }
     const result = await bounded(this.deadline ?? performance.now() + this.timeout, this.cancellation,
-      {op: 'call', endpoint: this.endpoint, server: this.server, frame, maxFrame: this.maxFrame, reply});
+      {op: 'call', endpoint: this.endpoint, server: this.server, frame, maxFrame: this.maxFrame, reply, sessions:this.sessions});
     return reply ? new Uint8Array(result.reply) : undefined;
   }
 

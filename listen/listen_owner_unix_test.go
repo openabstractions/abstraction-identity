@@ -151,3 +151,59 @@ func TestConcurrentStartsElectOneListener(t *testing.T) {
 	}
 	c.Close()
 }
+
+func TestListenRefusesInsecureParentWithoutChangingIt(t *testing.T) {
+	dir := shortSocketDir(t)
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "untrusted.sock")
+	if l, err := Listen(path); err == nil {
+		l.Close()
+		t.Fatal("insecure directory accepted")
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatal("directory was tightened", info, err)
+	}
+	if _, err := os.Lstat(path + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("refusal created a lock", err)
+	}
+}
+func TestListenRefusesLinkedOrPublicLockWithoutChangingTarget(t *testing.T) {
+	dir := shortSocketDir(t)
+	target := filepath.Join(dir, "retained")
+	want := []byte("retained-input")
+	if err := os.WriteFile(target, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "refused.sock")
+	if err := os.Symlink(target, path+".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := Listen(path); err == nil {
+		l.Close()
+		t.Fatal("linked lock accepted")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != string(want) {
+		t.Fatal("target changed", err)
+	}
+	if err := os.Remove(path + ".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".lock", want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path+".lock", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := Listen(path); err == nil {
+		l.Close()
+		t.Fatal("public lock accepted")
+	}
+	info, err := os.Stat(path + ".lock")
+	if err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatal("lock was tightened", info, err)
+	}
+}

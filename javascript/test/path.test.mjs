@@ -54,7 +54,7 @@ test('within requires absolute paths and propagates filesystem errors', async ()
 });
 
 if (process.platform === 'win32') {
-  test('within refuses paths ID-F1 marks off-local before native file access', async () => {
+  test('within refuses paths ID-F3 marks off-local before native file access', async () => {
     const folder = tmpdir();
     const refused = {code: 'ERR_NOT_LOCAL_PATH'};
     await assert.rejects(within('\\\\192.0.2.1\\share\\image.png', folder), refused);

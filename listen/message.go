@@ -16,10 +16,11 @@ var errMessageLifetime = errors.New("listen: message transport supplied no reque
 // when its context ends or Close interrupts the transport; FramedCall supplies
 // the exactly-once guard and applies the shared reply limit.
 type receivedMessage struct {
-	frame   []byte
-	binding *identity.Binding
-	done    <-chan struct{}
-	reply   func(context.Context, []byte) error
+	frame        []byte
+	binding      *identity.Binding
+	done         <-chan struct{}
+	reply        func(context.Context, []byte) error
+	matchStarted func(*identity.Binding, *identity.SealedResourceEvidence) (identity.Code, identity.Proof, error)
 }
 
 // messageReceiver is the request-scoped alternative to Conn's byte stream and

@@ -8,8 +8,13 @@ on the other end of a connection.
 
 Windows named pipes, Linux Unix sockets with `SO_PEERPIDFD`, and macOS XPC
 provide the account, process and executable evidence required by
-`listen.Program`. macOS Unix sockets have a lower process/path ceiling.
+[`listen.Program`](https://openabstractions.github.io/reference.html#concept-identity.listener-program-need). macOS Unix sockets have a lower process/path ceiling.
 Every fact carries the proof level the transport and build supplied.
+
+The Go line receiver's `listen.Call.Peer()` returns its retained native peer
+after rechecking the binding. It serializes that recheck with `Close` and refuses
+missing or closed evidence. `Recheck` uses the same owner; `Gone` remains the
+caller's disconnect signal. Mutable diagnostic `Caller` fields supply no proof.
 
 Let a local service verify which account and executable connected before it
 reads a protected request. Each fact records how strongly the operating system
@@ -83,7 +88,7 @@ Install the runtime first: https://openabstractions.org/adopt.html
   transports in this repository. Bun supports the stream paths and refuses XPC.
   Generated identity proof vocabulary is committed for Go, C++ and Python.
   These clients reach a receiving service that derives the caller's identity;
-  the language wrappers do not expose equivalent native `Peer`/`Binding`
+  the language wrappers do not expose equivalent native `Peer`/[`Binding`](https://openabstractions.github.io/reference.html#concept-identity.peer-binding)
   receiving-host APIs. The supported high-level receiver is Go's `listen/`.
   Client transport qualification and receiving-host support are separate.
 
@@ -203,7 +208,7 @@ out of the peer's pid unless the process behind it can be shown to have existed
 before the connection did. On macOS this check does not prevent substitution by a process that existed
 before connection; see the measured limitation below and CONTRACT.md.
 
-## Binding a peer, instead of looking one up
+## [Binding](https://openabstractions.github.io/reference.html#concept-identity.peer-binding) a peer, instead of looking one up
 
 `OfHandle` answers by looking the peer up when it is called, and a lookup is a
 race: every platform here resolves a program from a number, and what that number
@@ -218,7 +223,7 @@ if err := b.Check(policy); err != nil { return err } // ErrPeerMoved, not a stal
 ```
 
 `Bind` returns `ErrNoBinding` on a machine that has no primitive for it — a
-Linux kernel below 6.5 — rather than degrading to a lookup. `Ceiling().Bindable`
+Linux kernel below 6.5 — rather than degrading to a lookup. [`Ceiling().Bindable`](https://openabstractions.github.io/reference.html#concept-identity.proof-ceiling)
 says so before a connection exists, so a service can refuse to start.
 
 `Binding.Peer` and `Binding.Check` recheck; `Captured` is a diagnostic snapshot
@@ -285,6 +290,23 @@ Neither trade is obvious from the API, which is why
 [CONTRACT.md](CONTRACT.md) is long: what Windows will not tell you, and what a
 permission system built on this must therefore refuse to promise.
 
+## Which file a path names
+
+The `fileid` package answers which file a path names, in the caller's view,
+and hands back the open file for the effect:
+
+```go
+h, err := fileid.Open(ctx, peer, path, fileid.Options{}) // peer is the *identity.Peer, or fileid.Self
+if err != nil { return err } // a link to a share is refused before the share is contacted
+defer h.Close()
+key := h.FileID().Key() // volume and file ID; two spellings of one file share it
+```
+
+A store keeps `h.FileID().Stored()` and reads it back with `fileid.Revalidate`,
+which says `same`, `replaced`, `gone` or `moved`. [CONTRACT.md](CONTRACT.md)'s
+`ID-F` rules state the walk, the three name comparisons and what each older
+path function in this package still answers.
+
 ## Conformance
 
 The repository contains platform tests and retained execution evidence from
@@ -319,9 +341,17 @@ project's own tree.
 Below: the platform. Above:
 [abstraction-asks](https://github.com/openabstractions/abstraction-asks) and
 [abstraction-rights](https://github.com/openabstractions/abstraction-rights)
-bind every caller through it before reading a request, and
-[abstraction-download](https://github.com/openabstractions/abstraction-download)
-imports it for the same reason.
+bind every caller through it before reading a request.
+These units also import it, to bind callers or for its own-process,
+private-folder and file-identity answers: abstraction-cas,
+abstraction-config, abstraction-credentials, abstraction-download,
+abstraction-facade, abstraction-inference (remote peers), abstraction-job
+(`Self`), abstraction-logging, abstraction-model, abstraction-provider-kit
+(private folders), abstraction-resource, abstraction-router,
+abstraction-storage, abstraction-storage-over-local-stores, the provider
+modules lemonade, localai, modelbridge, modelhost, pytorch and thenoise,
+and the runtime (`serve`) and Panel (`monitor`) binaries. The list is
+taken from the project's non-test Go imports on 2026-10-21.
 
 One layer of [openabstractions](https://github.com/openabstractions/abstractions).
 Every layer names one thing local tools rebuild on their own; the name means the

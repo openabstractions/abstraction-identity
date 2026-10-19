@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // check refuses dir unless it is a directory reached through no link, owned
@@ -38,6 +40,22 @@ func checkInfo(info fs.FileInfo, uid int, exact bool) error {
 	if !info.IsDir() {
 		return errors.New("it is not a directory")
 	}
+	if err := checkOwnerMode(info, uid); err != nil {
+		return err
+	}
+	if exact && info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("its mode is %#o, not 0700", info.Mode().Perm())
+	}
+	return nil
+}
+
+const privateFileRead = false // O_PATH identity/stat access avoids opening FIFOs.
+
+func checkFileHandle(_ *os.File, info fs.FileInfo) error {
+	return checkOwnerMode(info, os.Getuid())
+}
+
+func checkOwnerMode(info fs.FileInfo, uid int) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return errors.New("its owner cannot be read")
@@ -45,8 +63,23 @@ func checkInfo(info fs.FileInfo, uid int, exact bool) error {
 	if int(stat.Uid) != uid {
 		return fmt.Errorf("it is owned by uid %d, not %d", stat.Uid, uid)
 	}
-	if info.Mode().Perm()&0o077 != 0 || (exact && info.Mode().Perm() != 0o700) {
+	if info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("its mode is %#o, not 0700", info.Mode().Perm())
+	}
+	return nil
+}
+
+// tighten opens dir as itself (O_NOFOLLOW refuses a link, O_DIRECTORY a
+// file) and gives it mode 0700 through that descriptor.
+func tighten(dir string) error {
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &fs.PathError{Op: "open", Path: dir, Err: err}
+	}
+	//unchecked: the descriptor is read-only; a failed close changes nothing
+	defer unix.Close(fd)
+	if err := unix.Fchmod(fd, 0o700); err != nil {
+		return &fs.PathError{Op: "fchmod", Path: dir, Err: err}
 	}
 	return nil
 }

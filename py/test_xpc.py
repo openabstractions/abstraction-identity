@@ -15,7 +15,7 @@ class XPCIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.library = Library(os.environ["OA_XPC_TEST_LIBRARY"])
         self.endpoint = "xpc:" + os.environ["OA_XPC_TEST_SERVICE"]
-        self.server = ServerExpectation(2, str(os.geteuid()), os.environ["OA_XPC_TEST_PROGRAM"])
+        self.server = ServerExpectation.current_account(os.environ["OA_XPC_TEST_PROGRAM"], library=self.library)
 
     def test_payloads_use_default_framed_routing(self):
         client = FrameTransport(self.library, self.endpoint, server=self.server)
@@ -36,7 +36,7 @@ class XPCIntegrationTests(unittest.TestCase):
         self.assertIsNone(client.write_frame(b"one-way"))
 
     def test_wrong_program_is_refused(self):
-        server = ServerExpectation(2, str(os.geteuid()), "/usr/bin/true")
+        server = ServerExpectation.current_account("/usr/bin/true", library=self.library)
         client = FrameTransport(self.library, self.endpoint, server=server)
         with self.assertRaises(FrameError) as caught:
             client.exchange_frame(b"must-not-dispatch")

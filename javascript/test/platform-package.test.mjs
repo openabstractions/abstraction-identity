@@ -9,7 +9,7 @@ import {cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import test from 'node:test';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 
 const source = dirname(dirname(fileURLToPath(import.meta.url)));
 const identity = `${process.platform}-${process.arch}`;
@@ -19,6 +19,31 @@ const libraries = {
   'darwin-x64': 'libabstraction_ipc.dylib',
   'darwin-arm64': 'libabstraction_ipc.dylib',
 };
+
+test('ordinary calls refuse old addons before I/O, while explicit sessions keep their contract', () => {
+  const root=mkdtempSync(join(tmpdir(),'oa-old-addon-'));
+  try {
+    for(const feature of ['', 'features:()=>0,']) {
+      const addon=join(root,feature?'old-feature.cjs':'old-addon.cjs');
+      writeFileSync(addon,`module.exports={${feature}createCancellation:()=>({}),cancel:()=>{},call:async(...args)=>{if(!args[7])throw Error('ordinary I/O reached');return Buffer.from([7]);}}`);
+      const script=`import assert from 'node:assert/strict';import {FrameTransport,Status} from ${JSON.stringify(pathToFileURL(join(source,'index.js')).href)};
+        for(const bytes of [new Uint8Array(),Uint8Array.of(0,255)])await assert.rejects(new FrameTransport('never-connect').exchangeFrame(bytes),e=>e.status===Status.ProofUnavailable&&e.transferred===0);
+        assert.deepEqual(Buffer.from(await new FrameTransport('explicit-session',{sessions:true}).exchangeFrame(Uint8Array.of(1))),Buffer.from([7]));`;
+      execFileSync(process.execPath,['--input-type=module','-e',script],{env:{...process.env,ABSTRACTION_IPC_NODE:addon},windowsHide:true});
+    }
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('single-exchange addons without open-phase proof retain their original typed failure', () => {
+  const root=mkdtempSync(join(tmpdir(),'oa-old-open-proof-'));
+  try {
+    const addon=join(root,'single-exchange.cjs');
+    writeFileSync(addon,`module.exports={features:()=>4,createCancellation:()=>({}),cancel:()=>{},call:async()=>{throw Object.assign(Error('write acceptance unknown'),{status:3,transferred:0});}}`);
+    const script=`import assert from 'node:assert/strict';import {FrameTransport,Status} from ${JSON.stringify(pathToFileURL(join(source,'index.js')).href)};
+      for(const frame of [new Uint8Array(),Uint8Array.of(1)])await assert.rejects(new FrameTransport('fixture').exchangeFrame(frame),e=>e.status===Status.IoError&&e.transferred===0);`;
+    execFileSync(process.execPath,['--input-type=module','-e',script],{env:{...process.env,ABSTRACTION_IPC_NODE:addon},windowsHide:true});
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
 
 const probe = `
 const fake = process.env.OA_FAKE_PLATFORM;

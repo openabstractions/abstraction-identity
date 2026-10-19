@@ -1,6 +1,11 @@
 // An absent runtime and a failed installed-runtime selection name what was
 // attempted and the next step, and keep their typed status.
+#include <abstraction/ipc/client.h>
+static bool older_native = false;
+static uint32_t wrapper_features() { return older_native ? 0 : oa_ipc_features(); }
+#define oa_ipc_features wrapper_features
 #include <abstraction/ipc/frame.hpp>
+#undef oa_ipc_features
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -32,6 +37,16 @@ int main() {
 #else
         const std::string absent = "/tmp/oa-absent-" + suffix + ".sock";
 #endif
+        older_native = true;
+        try {
+            FrameTransport(absent, 1000).exchange_frame("");
+            require(false, "older native library accepted ordinary framing");
+        } catch (const FrameError& error) {
+            require(error.status == Status::ProofUnavailable &&
+                contains(error.what(), "native single-exchange transport unavailable"),
+                "missing feature did not refuse before connect");
+        }
+        older_native = false;
         for (int exchange = 0; exchange < 2; ++exchange) {
             FrameTransport transport(absent, 1000);
             try {
@@ -42,7 +57,7 @@ int main() {
                 require(contains(what, "connect " + absent + ": no runtime accepted the connection"), "absent endpoint not named: " + what);
                 require(contains(what, "Start the runtime") && contains(what, "--isolated"), "absent endpoint next step missing: " + what);
                 require(!contains(what, "frame write failed"), "absent endpoint reported as a write failure: " + what);
-                require(error.status == Status::IoError || error.status == Status::Disconnected, "absent endpoint status changed: " + what);
+                require(error.status == Status::OpenIoError || error.status == Status::Disconnected, "absent endpoint status changed: " + what);
             }
         }
         try {

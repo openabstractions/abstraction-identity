@@ -7,6 +7,7 @@ package identity
 
 import (
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -100,6 +101,39 @@ func TestWithoutPidfdNothingFromProcIsBound(t *testing.T) {
 	}
 	// The pid and the user are unaffected: the kernel stamped those at
 	// connect and no lookup was involved.
+	if _, err := p.User.AtLeast(ProofKernel); err != nil {
+		t.Errorf("user: %v", err)
+	}
+	if _, err := p.Process.AtLeast(ProofKernel); err != nil {
+		t.Errorf("process: %v", err)
+	}
+}
+
+// TestUnexpectedPidfdErrnoRefusesPath: only ENOPROTOOPT means a kernel without
+// SO_PEERPIDFD. Any other errno from the pinning call refuses the path and
+// package, keeps the connect-time credentials, and names the errno (ID-U5).
+func TestUnexpectedPidfdErrnoRefusesPath(t *testing.T) {
+	saved := peerPIDFD
+	peerPIDFD = func(int) (int, error) { return -1, syscall.EMFILE }
+	t.Cleanup(func() { peerPIDFD = saved })
+
+	l, path := listenUnix(t)
+	startChildClient(t, path, "x", true)
+	c, at, _ := acceptAndRead(t, l)
+	p := identify(t, c, at)
+
+	if _, err := p.Path.AtLeast(ProofPID); err == nil {
+		t.Fatalf("path served at %s after an unexpected SO_PEERPIDFD errno; want refused", p.Path.Proof())
+	}
+	if _, err := p.Package.AtLeast(ProofPID); err == nil {
+		t.Errorf("package served at %s after an unexpected SO_PEERPIDFD errno", p.Package.Proof())
+	}
+	if !strings.Contains(p.Path.Why(), syscall.EMFILE.Error()) {
+		t.Errorf("path why = %q, want the errno", p.Path.Why())
+	}
+	if !strings.Contains(strings.Join(p.Notes, "\n"), syscall.EMFILE.Error()) {
+		t.Errorf("notes = %q, want the errno", p.Notes)
+	}
 	if _, err := p.User.AtLeast(ProofKernel); err != nil {
 		t.Errorf("user: %v", err)
 	}

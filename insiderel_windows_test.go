@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// [ID-F1] InsideRel returns ErrNotLocalPath for a refused path, even one
+// [ID-F9] InsideRel returns ErrNotLocalPath for a refused path, even one
 // spelled below a folder that does not exist.
 func TestInsideRelRefusedPathReturnsItsError(t *testing.T) {
 	restore := TreatDriveAsNetwork('Y')

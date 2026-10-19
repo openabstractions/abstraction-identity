@@ -21,17 +21,31 @@ namespace {
 constexpr unsigned char session_flag = 0x80;
 constexpr unsigned char proof_refusal[6] = {0xff, 0xff, 0xff, 0xfe, 1, 8};
 enum class TestCase { ordinary, write_error, pooled_refusal, pooled_one_way_refusal, fresh_refusal,
-    single_refusal, single_one_way_refusal, direct_refusal, direct_one_way_refusal,
-    direct_malformed, direct_truncated, direct_old_eof, direct_oversize };
+    single_refusal, single_one_way_refusal, fallback_open_error, closing_open_error, pooled_closing_open_error,
+    direct_refusal, direct_one_way_refusal,
+    direct_malformed, direct_truncated, direct_old_eof, direct_oversize,
+    direct_echo, direct_empty, direct_binary, direct_one_way_eof, direct_native, direct_empty_error, direct_zero_error };
 bool direct_case(TestCase scenario) {
-    return scenario == TestCase::direct_refusal || scenario == TestCase::direct_one_way_refusal ||
-        scenario == TestCase::direct_malformed || scenario == TestCase::direct_truncated ||
-        scenario == TestCase::direct_old_eof || scenario == TestCase::direct_oversize;
+    return scenario >= TestCase::direct_refusal;
+}
+std::string direct_payload(TestCase scenario) {
+    if (scenario == TestCase::direct_empty || scenario == TestCase::direct_empty_error) return {};
+    return scenario == TestCase::direct_binary ? std::string("a\0\xff", 3) : "one";
 }
 std::atomic<int>* received_requests = nullptr;
 std::atomic<bool>* release_second = nullptr;
 std::atomic<int> injected_writes{0};
 std::atomic<int> retry_opens{0};
+
+oa_ipc_status empty_header_then_error(oa_ipc_connection* c, const unsigned char* bytes, size_t length, size_t* moved) {
+    const auto result = oa_ipc_write(c, bytes, 4, moved);
+    if (result != OA_IPC_OK || (length != 4 && length != 7) || *moved != 4) return result;
+    ++injected_writes;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (received_requests->load() < 1 && std::chrono::steady_clock::now() < until)
+        std::this_thread::yield();
+    return OA_IPC_IO_ERROR;
+}
 
 oa_ipc_status full_write_then_error(oa_ipc_connection* c, const unsigned char* bytes, size_t length, size_t* moved) {
     const auto result = oa_ipc_write(c, bytes, length, moved);
@@ -48,6 +62,32 @@ oa_ipc_status refuse_retry_open(const std::string&, std::chrono::steady_clock::t
     oa_ipc_cancellation*, const oa_ipc_server_expectation*, oa_ipc_connection**) {
     ++retry_opens;
     return OA_IPC_IO_ERROR;
+}
+oa_ipc_status first_open_then_error(const std::string& endpoint, std::chrono::steady_clock::time_point deadline,
+    oa_ipc_cancellation* cancellation, const oa_ipc_server_expectation* expected, oa_ipc_connection** out) {
+    if (++retry_opens != 1) return OA_IPC_IO_ERROR;
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+    const auto ms = remaining > 0 ? static_cast<uint32_t>(remaining) : 0;
+    return expected ? oa_ipc_open_verified(endpoint.data(), endpoint.size(), ms, cancellation, expected, out)
+        : oa_ipc_open_cancelable(endpoint.data(), endpoint.size(), ms, cancellation, out);
+}
+oa_ipc_status initial_open_error = OA_IPC_IO_ERROR;
+oa_ipc_status injected_initial_open(const std::string&, std::chrono::steady_clock::time_point,
+    oa_ipc_cancellation*, const oa_ipc_server_expectation*, oa_ipc_connection**) { return initial_open_error; }
+bool initial_open_classification() {
+    abstraction::ipc_internal::session_test_open = injected_initial_open;
+    bool ok = true;
+    for (auto error : {OA_IPC_IO_ERROR, OA_IPC_TIMEOUT, OA_IPC_CANCELLED, OA_IPC_UNTRUSTED, OA_IPC_PROOF_UNAVAILABLE})
+    for (uint32_t flags : {0u, 2u, 4u, 6u}) for (const auto& body : {std::string(), std::string("one")}) {
+        initial_open_error = error;
+        oa_ipc_reply* reply = nullptr; size_t sent = 99;
+        const auto status = oa_ipc_session_call("initial-open-fixture", 20, 100, nullptr, nullptr,
+            body.data(), body.size(), 3, flags, &reply, &sent);
+        ok = ok && status == ((flags & OA_IPC_CALL_REPORT_OPEN_FAILURE) && error == OA_IPC_IO_ERROR ? OA_IPC_OPEN_IO_ERROR : error) &&
+            reply == nullptr && sent == 0;
+    }
+    abstraction::ipc_internal::session_test_open = nullptr;
+    return ok;
 }
 
 bool read_all(
@@ -109,13 +149,30 @@ bool serve_two(
         const bool one_way = (i == 1 && scenario == TestCase::pooled_one_way_refusal) ||
             (i == 0 && scenario == TestCase::single_one_way_refusal);
         if (!read_all(peer, header, sizeof header) || header[0] != (direct ? 0 : one_way ? 0xc0 : session_flag) ||
-            header[1] != 0 || header[2] != 0 || header[3] != 3) return false;
+            header[1] != 0 || header[2] != 0 || header[3] != (direct ? direct_payload(scenario).size() : 3)) return false;
         if (i == 0) {
+            if (scenario == TestCase::fallback_open_error) return true;
+            if (scenario == TestCase::closing_open_error) {
+                const unsigned char closing[4] = {0xff, 0xff, 0xff, 0xff};
+                if (!write_all(peer, closing, sizeof closing)) return false;
+                unsigned char byte; read_all(peer, &byte, 1); return true;
+            }
             if (direct) {
-                unsigned char body[3];
-                if (!read_all(peer, body, sizeof body)) return false;
+                if (scenario == TestCase::direct_zero_error) { ++received; return true; }
+                const auto payload = direct_payload(scenario);
+                std::string body(payload.size(), '\0');
+                if (!read_all(peer, reinterpret_cast<unsigned char*>(body.data()), body.size()) || body != payload) return false;
                 ++received;
-                if (scenario == TestCase::direct_old_eof) return true;
+                if (scenario == TestCase::direct_old_eof || scenario == TestCase::direct_one_way_eof ||
+                    scenario == TestCase::direct_empty_error) return true;
+                if (scenario == TestCase::direct_echo || scenario == TestCase::direct_empty ||
+                    scenario == TestCase::direct_binary || scenario == TestCase::direct_native) {
+                    const unsigned char answer[4] = {0, 0, 0, static_cast<unsigned char>(body.size())};
+                    if (!write_all(peer, answer, sizeof answer) ||
+                        !write_all(peer, reinterpret_cast<const unsigned char*>(body.data()), body.size())) return false;
+                    unsigned char byte; read_all(peer, &byte, 1);
+                    return true;
+                }
                 if (scenario == TestCase::direct_oversize) {
                     const unsigned char oversized[4] = {0x40, 0, 0, 0};
                     if (!write_all(peer, oversized, sizeof oversized)) return false;
@@ -153,6 +210,11 @@ bool serve_two(
         unsigned char body[3];
         if (!read_all(peer, body, sizeof body)) return false;
         ++received;
+        if (i == 1 && scenario == TestCase::pooled_closing_open_error) {
+            const unsigned char closing[4] = {0xff, 0xff, 0xff, 0xff};
+            if (!write_all(peer, closing, sizeof closing)) return false;
+            unsigned char byte; read_all(peer, &byte, 1); return true;
+        }
         if (i == 1 && scenario == TestCase::write_error) {
             const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
             while (!release.load() && std::chrono::steady_clock::now() < until)
@@ -177,6 +239,8 @@ bool serve_two(
 }
 bool run_case(TestCase scenario) {
     const bool inject_error = scenario == TestCase::write_error;
+    const bool later_open = scenario == TestCase::fallback_open_error || scenario == TestCase::closing_open_error ||
+        scenario == TestCase::pooled_closing_open_error;
     const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
         "-" + std::to_string(static_cast<int>(scenario));
 #ifdef _WIN32
@@ -215,16 +279,36 @@ bool run_case(TestCase scenario) {
     retry_opens = 0;
     received_requests = &received;
     release_second = &release;
+    if (later_open) abstraction::ipc_internal::session_test_open = first_open_then_error;
     if (direct_case(scenario)) {
+        const auto payload = direct_payload(scenario);
+        if (scenario == TestCase::direct_empty_error || scenario == TestCase::direct_zero_error)
+            abstraction::ipc_internal::session_test_write = empty_header_then_error;
         try {
             abstraction::ipc::FrameTransport transport(endpoint, 2000, 3);
-            if (scenario == TestCase::direct_one_way_refusal) transport.write_frame("one");
-            else transport.exchange_frame("one");
-            calls_ok = false;
+            if (scenario == TestCase::direct_native) {
+                oa_ipc_reply* reply = nullptr; size_t sent = 0, size = 0;
+                const auto status = oa_ipc_session_call(endpoint.data(), endpoint.size(), 2000, nullptr, nullptr,
+                    payload.data(), payload.size(), 3, OA_IPC_CALL_SINGLE_EXCHANGE, &reply, &sent);
+                const auto* bytes = oa_ipc_reply_data(reply, &size);
+                calls_ok = status == OA_IPC_OK && sent == payload.size() && size == payload.size() &&
+                    bytes && !std::memcmp(bytes, payload.data(), size);
+                oa_ipc_reply_release(reply);
+            } else if (scenario == TestCase::direct_one_way_refusal || scenario == TestCase::direct_one_way_eof) {
+                transport.write_frame(payload);
+                calls_ok = scenario == TestCase::direct_one_way_eof;
+            } else {
+                const auto reply = transport.exchange_frame(payload);
+                calls_ok = (scenario == TestCase::direct_echo || scenario == TestCase::direct_empty ||
+                    scenario == TestCase::direct_binary) && reply == payload;
+            }
         } catch (const abstraction::ipc::FrameError& error) {
             if (scenario == TestCase::direct_refusal || scenario == TestCase::direct_one_way_refusal)
                 calls_ok = error.status == abstraction::ipc::Status::ProofUnavailable &&
-                    std::string(error.what()).find("user requires signed") != std::string::npos;
+                    std::string(error.what()).find("frame proof unavailable") != std::string::npos;
+            else if (scenario == TestCase::direct_empty_error || scenario == TestCase::direct_zero_error)
+                calls_ok = !dynamic_cast<const abstraction::ipc::detail::PreSendFrameError*>(&error) &&
+                    std::string(error.what()).find("may have reached") != std::string::npos;
             else if (scenario == TestCase::direct_oversize)
                 calls_ok = error.status == abstraction::ipc::Status::InvalidArgument;
             else
@@ -232,7 +316,8 @@ bool run_case(TestCase scenario) {
         }
     } else for (const char* request : {"one", "two"}) {
         if ((scenario == TestCase::fresh_refusal || scenario == TestCase::single_refusal ||
-             scenario == TestCase::single_one_way_refusal) && std::strcmp(request, "two") == 0) break;
+             scenario == TestCase::single_one_way_refusal || scenario == TestCase::fallback_open_error ||
+             scenario == TestCase::closing_open_error) && std::strcmp(request, "two") == 0) break;
         if (inject_error && std::strcmp(request, "two") == 0) {
             abstraction::ipc_internal::session_test_write = full_write_then_error;
             abstraction::ipc_internal::session_test_open = refuse_retry_open;
@@ -241,17 +326,19 @@ bool run_case(TestCase scenario) {
         size_t sent = 0;
         const auto status = oa_ipc_session_call(endpoint.c_str(), endpoint.size(), 2000,
             nullptr, nullptr, request, 3, 3,
-            (scenario == TestCase::pooled_one_way_refusal && std::strcmp(request, "two") == 0) ||
-                scenario == TestCase::single_one_way_refusal ? OA_IPC_CALL_ONE_WAY : 0,
+            (((scenario == TestCase::pooled_one_way_refusal && std::strcmp(request, "two") == 0) ||
+                scenario == TestCase::single_one_way_refusal) ? OA_IPC_CALL_ONE_WAY : 0) |
+                (later_open ? OA_IPC_CALL_REPORT_OPEN_FAILURE : 0),
             &reply, &sent);
         size_t length = 0;
         const auto* bytes = oa_ipc_reply_data(reply, &length);
-        const bool expected_error = inject_error && std::strcmp(request, "two") == 0;
+        const bool expected_error = (inject_error && std::strcmp(request, "two") == 0) ||
+            (later_open && (scenario != TestCase::pooled_closing_open_error || std::strcmp(request, "two") == 0));
         const bool expected_refusal = scenario == TestCase::fresh_refusal ||
             scenario == TestCase::single_refusal || scenario == TestCase::single_one_way_refusal ||
             ((scenario == TestCase::pooled_refusal || scenario == TestCase::pooled_one_way_refusal) &&
              std::strcmp(request, "two") == 0);
-        if ((expected_error && (status != OA_IPC_IO_ERROR || sent != 3 || reply != nullptr)) ||
+        if ((expected_error && (status != OA_IPC_IO_ERROR || sent != (later_open ? 0u : 3u) || reply != nullptr)) ||
             (expected_refusal && (status != OA_IPC_PROOF_UNAVAILABLE ||
                 sent != (scenario == TestCase::fresh_refusal ? 0u : 3u) || reply != nullptr)) ||
             (!expected_error && !expected_refusal && (status != OA_IPC_OK || sent != 3 || length != 3 ||
@@ -277,7 +364,10 @@ bool run_case(TestCase scenario) {
             injected_writes.load(), retry_opens.load());
         calls_ok = false;
     }
-    const int want_received = scenario == TestCase::fresh_refusal ? 0 :
+    if ((scenario == TestCase::direct_empty_error || scenario == TestCase::direct_zero_error) && injected_writes != 1) calls_ok = false;
+    if (later_open && retry_opens != 2) calls_ok = false;
+    const int want_received = scenario == TestCase::fresh_refusal || scenario == TestCase::fallback_open_error ||
+        scenario == TestCase::closing_open_error ? 0 :
         (scenario == TestCase::single_refusal || scenario == TestCase::single_one_way_refusal ||
          direct_case(scenario) ? 1 : 2);
     return calls_ok && served && received == want_received;
@@ -502,11 +592,16 @@ bool run_real_early_linux(bool pooled, bool one_way) {
 } // namespace
 
 int main() {
+    if (!(oa_ipc_features() & OA_IPC_FEATURE_SINGLE_EXCHANGE)) return 1;
+    if (!(oa_ipc_features() & OA_IPC_FEATURE_OPEN_FAILURE) || !initial_open_classification()) return 1;
     oa_ipc_reply* oversized_reply = nullptr;
     size_t oversized_sent = 0;
     const char byte = 'x';
     if (oa_ipc_session_call("x", 1, 100, nullptr, nullptr, &byte, size_t(0x40000000u), 1,
             0, &oversized_reply, &oversized_sent) != OA_IPC_INVALID_ARGUMENT || oversized_reply || oversized_sent)
+        return 1;
+    if (oa_ipc_session_call("x", 1, 100, nullptr, nullptr, &byte, 1, 1,
+            8, &oversized_reply, &oversized_sent) != OA_IPC_INVALID_ARGUMENT || oversized_reply || oversized_sent)
         return 1;
     return run_case(TestCase::ordinary) && run_case(TestCase::write_error) &&
         run_case(TestCase::fresh_refusal) && run_case(TestCase::pooled_refusal) &&
@@ -515,6 +610,12 @@ int main() {
         run_case(TestCase::direct_one_way_refusal) && run_case(TestCase::direct_malformed) &&
         run_case(TestCase::direct_truncated) && run_case(TestCase::direct_old_eof) &&
         run_case(TestCase::direct_oversize) &&
+        run_case(TestCase::direct_echo) && run_case(TestCase::direct_empty) &&
+        run_case(TestCase::direct_binary) && run_case(TestCase::direct_one_way_eof) &&
+        run_case(TestCase::direct_native) && run_case(TestCase::direct_empty_error) &&
+        run_case(TestCase::direct_zero_error) &&
+        run_case(TestCase::fallback_open_error) && run_case(TestCase::closing_open_error) &&
+        run_case(TestCase::pooled_closing_open_error) &&
         run_early_case(false, false, EarlyControl::valid) &&
         run_early_case(false, true, EarlyControl::valid) &&
         run_early_case(false, false, EarlyControl::valid, EarlyStage::header) &&

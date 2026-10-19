@@ -10,6 +10,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/openabstractions/abstraction-identity/internal/personfolders"
 	"golang.org/x/sys/windows"
 )
 
@@ -47,7 +48,7 @@ func TestMain(m *testing.M) {
 	if name := os.Getenv(serverEnv); name != "" {
 		os.Exit(runServer(name))
 	}
-	os.Exit(m.Run())
+	os.Exit(personfolders.Main(m))
 }
 
 func requireListenSecurityProbeOptIn(t *testing.T) {

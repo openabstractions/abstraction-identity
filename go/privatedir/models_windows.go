@@ -3,20 +3,27 @@
 package privatedir
 
 import (
+	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
 	"unsafe"
 
-	identity "github.com/openabstractions/abstraction-identity"
+	"github.com/openabstractions/abstraction-identity/fileid"
 	"golang.org/x/sys/windows"
 )
 
 func extendedPath(p string) string { return `\\?\` + p }
-func plainFinal(raw string) string { return strings.TrimPrefix(raw, `\\?\`) }
-func (e *heldEntry) close() error  { return windows.CloseHandle(e.h) }
+func (e *heldEntry) close() error {
+	if e.file != nil {
+		return e.file.Close()
+	}
+	return windows.CloseHandle(e.h)
+}
 
 // The descriptors ProtectModelFolder writes: the folder's own, protected,
 // and those of a folder and a file below it, which carry the same three
@@ -38,6 +45,92 @@ type heldEntry struct {
 	path string
 	h    windows.Handle
 	dir  bool
+	file *os.File
+}
+
+// reopenEntry keeps the admitted file object while acquiring the descriptor
+// rights and no-delete sharing already used by this owner. ReOpenFile's
+// documented source is a CreateFile handle; native fileid handles instead
+// use NtCreateFile. Use the existing fileid same-object empty-name pattern
+// with the actual directory/file type and unchanged caller-token access.
+// https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile
+func reopenEntry(admitted fileid.Handle) (*heldEntry, windows.ByHandleFileInformation, error) {
+	var options uint32
+	if admitted.FileID().IsDir() {
+		options |= windows.FILE_DIRECTORY_FILE
+	} else {
+		options |= windows.FILE_NON_DIRECTORY_FILE
+	}
+	e, info, err := modelEntryAt(windows.Handle(admitted.File().Fd()), "", admitted.FileID().Path(), options)
+	if err != nil {
+		return nil, info, err
+	}
+	key, err := fileid.FileKeyOf(e.file)
+	if err != nil || key != admitted.FileID().Key() {
+		e.close()
+		return nil, info, errors.New("descriptor handle differs from the admitted file")
+	}
+	return e, info, nil
+}
+
+func modelEntryAt(parent windows.Handle, name, display string, options uint32) (*heldEntry, windows.ByHandleFileInformation, error) {
+	var info windows.ByHandleFileInformation
+	u, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return nil, info, err
+	}
+	qos := windows.SECURITY_QUALITY_OF_SERVICE{
+		Length: uint32(unsafe.Sizeof(windows.SECURITY_QUALITY_OF_SERVICE{})), ImpersonationLevel: windows.SecurityIdentification,
+	}
+	oa := windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: parent, ObjectName: u, SecurityQoS: &qos}
+	options |= windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT | windows.FILE_OPEN_FOR_BACKUP_INTENT
+	var h windows.Handle
+	var ios windows.IO_STATUS_BLOCK
+	err = windows.NtCreateFile(&h, windows.FILE_READ_DATA|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+		&oa, &ios, nil, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_OPEN, options, 0, 0)
+	if err != nil {
+		return nil, info, fmt.Errorf("open held model entry %s: %w", display, err)
+	}
+	e := &heldEntry{path: display, h: h, file: os.NewFile(uintptr(h), display)}
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		e.close()
+		return nil, info, err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		e.close()
+		return nil, info, errors.New("admitted entry is a reparse point")
+	}
+	e.dir = info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+	return e, info, nil
+}
+
+func modelChildEntry(parent *heldEntry, name string) (*heldEntry, windows.ByHandleFileInformation, error) {
+	// This is an existing one-component name returned by held enumeration,
+	// not a portable create name. Keep literal trailing dots/spaces and DOS
+	// device words; refuse traversal, streams and embedded separators.
+	if !literalModelName(name) {
+		return nil, windows.ByHandleFileInformation{}, errors.New("not a literal model child name")
+	}
+	return modelEntryAt(parent.h, name, filepath.Join(parent.path, name), 0)
+}
+
+func literalModelName(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\\:\x00")
+}
+
+func readHeldDirectory(e *heldEntry) ([]os.DirEntry, error) {
+	var duplicate windows.Handle
+	if err := windows.DuplicateHandle(windows.CurrentProcess(), e.h, windows.CurrentProcess(), &duplicate, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(duplicate), e.path)
+	entries, err := f.ReadDir(-1)
+	closeErr := f.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read held directory %s: %w", e.path, err)
+	}
+	return entries, closeErr
 }
 
 // openEntry opens p as itself, a reparse point included, with the rights to
@@ -74,51 +167,159 @@ func openEntry(p string) (*heldEntry, windows.ByHandleFileInformation, error) {
 }
 
 var (
-	kernel32               = windows.NewLazySystemDLL("kernel32.dll")
-	procFindFirstFileNameW = kernel32.NewProc("FindFirstFileNameW")
-	procFindNextFileNameW  = kernel32.NewProc("FindNextFileNameW")
+	kernel32         = windows.NewLazySystemDLL("kernel32.dll")
+	procOpenFileByID = kernel32.NewProc("OpenFileById")
 )
 
-// linkNames is every name of the file at p (FindFirstFileNameW and
-// FindNextFileNameW), each with p's volume.
-func linkNames(p string) ([]string, error) {
-	name, err := windows.UTF16PtrFromString(extendedPath(p))
+// Tests can supply malformed OS replies without contacting another volume.
+var modelLinkQuery = windows.NtQueryInformationFile
+
+// hardlinkParentsWithin queries the admitted file, rather than reopening
+// its old path. Native FILE_LINKS_INFORMATION entries are 8-byte aligned;
+// their FileNameLength counts UTF-16 characters (ntifs.h).
+// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_links_information
+func hardlinkParentsWithin(e *heldEntry, roots []fileid.Handle, expected uint32) error {
+	key, err := fileid.FileKeyOf(e.file)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	vol := filepath.VolumeName(p)
-	buf := make([]uint16, 1024)
-	n := uint32(len(buf))
-	r, _, e := procFindFirstFileNameW.Call(uintptr(unsafe.Pointer(name)), 0, uintptr(unsafe.Pointer(&n)), uintptr(unsafe.Pointer(&buf[0])))
-	for windows.Handle(r) == windows.InvalidHandle && errors.Is(e, windows.ERROR_MORE_DATA) {
-		buf = make([]uint16, n)
-		r, _, e = procFindFirstFileNameW.Call(uintptr(unsafe.Pointer(name)), 0, uintptr(unsafe.Pointer(&n)), uintptr(unsafe.Pointer(&buf[0])))
-	}
-	if windows.Handle(r) == windows.InvalidHandle {
-		return nil, e
-	}
-	find := windows.Handle(r)
-	defer windows.FindClose(find)
-	names := []string{vol + windows.UTF16ToString(buf[:n])}
+	buf := hardlinkBuffer(4096)
 	for {
-		n = uint32(len(buf))
-		ok, _, e := procFindNextFileNameW.Call(uintptr(find), uintptr(unsafe.Pointer(&n)), uintptr(unsafe.Pointer(&buf[0])))
-		if ok == 0 {
-			if errors.Is(e, windows.ERROR_HANDLE_EOF) {
-				return names, nil
+		var ios windows.IO_STATUS_BLOCK
+		err := modelLinkQuery(e.h, &ios, &buf[0], uint32(len(buf)), 46)
+		if err != nil {
+			needed := binary.LittleEndian.Uint32(buf[:4])
+			if needed > uint32(len(buf)) && needed <= 64<<20 {
+				buf = hardlinkBuffer(needed)
+				continue
 			}
-			if errors.Is(e, windows.ERROR_MORE_DATA) {
-				buf = make([]uint16, n)
-				// The name that did not fit is asked for again.
-				ok, _, e = procFindNextFileNameW.Call(uintptr(find), uintptr(unsafe.Pointer(&n)), uintptr(unsafe.Pointer(&buf[0])))
-				if ok == 0 {
-					return nil, e
+			return fmt.Errorf("held hard-link query: %w", err)
+		}
+		if ios.Information < 8 || ios.Information > uintptr(len(buf)) {
+			return errors.New("held hard-link query returned an invalid byte count")
+		}
+		buf = buf[:int(ios.Information)]
+		if needed := binary.LittleEndian.Uint32(buf[:4]); needed == 0 || uint64(needed) > uint64(len(buf)) {
+			return errors.New("held hard-link query returned incomplete bytes")
+		}
+		count := binary.LittleEndian.Uint32(buf[4:8])
+		if count != expected || count == 0 {
+			return errors.New("held hard-link query returned an incomplete name set")
+		}
+		offset := 8
+		for i := uint32(0); i < count; i++ {
+			if offset > len(buf)-20 {
+				return errors.New("malformed held hard-link entry")
+			}
+			next := binary.LittleEndian.Uint32(buf[offset:])
+			parentID := binary.LittleEndian.Uint64(buf[offset+8:])
+			characters := binary.LittleEndian.Uint32(buf[offset+16:])
+			if parentID == 0 || characters == 0 || uint64(characters)*2 > uint64(len(buf)-offset-20) {
+				return errors.New("malformed held hard-link parent/name")
+			}
+			units := make([]uint16, int(characters))
+			for j := range units {
+				units[j] = binary.LittleEndian.Uint16(buf[offset+20+j*2:])
+			}
+			for j := 0; j < len(units); j++ {
+				if units[j] >= 0xd800 && units[j] <= 0xdbff {
+					if j+1 == len(units) || units[j+1] < 0xdc00 || units[j+1] > 0xdfff {
+						return errors.New("held hard-link query returned an invalid UTF-16 name")
+					}
+					j++
+				} else if units[j] >= 0xdc00 && units[j] <= 0xdfff {
+					return errors.New("held hard-link query returned an invalid UTF-16 name")
+				}
+			}
+			name := string(utf16.Decode(units))
+			if !literalModelName(name) {
+				return errors.New("held hard-link query returned a nonliteral name")
+			}
+			if err := hardlinkParentWithin(e.h, parentID, name, key, roots); err != nil {
+				return err
+			}
+			if i+1 == count {
+				if next != 0 {
+					return errors.New("held hard-link query has trailing entries")
 				}
 			} else {
-				return nil, e
+				if uint64(next) < 20+uint64(characters)*2 || next%8 != 0 || uint64(next) > uint64(len(buf)-offset) {
+					return errors.New("malformed held hard-link offset")
+				}
+				offset += int(next)
 			}
 		}
-		names = append(names, vol+windows.UTF16ToString(buf[:n]))
+		return nil
+	}
+}
+
+func hardlinkBuffer(size uint32) []byte {
+	// NtQueryInformationFile requires native 8-byte alignment for this
+	// structure; a stack-backed byte array has only byte alignment.
+	words := make([]uint64, (int(size)+7)/8)
+	return unsafe.Slice((*byte)(unsafe.Pointer(&words[0])), len(words)*8)
+}
+
+func hardlinkParentWithin(volumeHint windows.Handle, id uint64, name, expectedKey string, roots []fileid.Handle) error {
+	// FILE_ID_DESCRIPTOR has a 16-byte union even for its 64-bit FileId.
+	descriptor := struct {
+		Size uint32
+		Kind uint32
+		ID   [2]uint64
+	}{Size: 24, ID: [2]uint64{id}}
+	raw, _, err := procOpenFileByID.Call(uintptr(volumeHint), uintptr(unsafe.Pointer(&descriptor)),
+		uintptr(windows.FILE_READ_ATTRIBUTES|windows.FILE_READ_DATA), uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE), 0,
+		uintptr(windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT))
+	h := windows.Handle(raw)
+	if h == windows.InvalidHandle {
+		return err
+	}
+	f := os.NewFile(uintptr(h), "held hard-link parent")
+	defer f.Close()
+	key, err := fileid.FileKeyOf(f)
+	if err != nil {
+		return err
+	}
+	parentName := make([]uint16, 512)
+	for {
+		n, err := windows.GetFinalPathNameByHandle(h, &parentName[0], uint32(len(parentName)), 0)
+		if err != nil {
+			return err
+		}
+		if int(n) >= len(parentName) {
+			parentName = make([]uint16, int(n)+1)
+			continue
+		}
+		parent, err := fileid.Open(context.Background(), fileid.Self, windows.UTF16ToString(parentName[:n]), fileid.Options{Links: fileid.RefuseLinks})
+		if err != nil {
+			return err
+		}
+		defer parent.Close()
+		if !parent.FileID().IsDir() || parent.FileID().Key() != key {
+			return errors.New("hard-link parent changed at its locator")
+		}
+		for _, root := range roots {
+			relation, err := parent.Relate(root)
+			if err != nil {
+				return err
+			}
+			if relation.Kind != fileid.RelationOutside {
+				entry, _, err := modelEntryAt(h, name, "held hard-link name", windows.FILE_NON_DIRECTORY_FILE)
+				if err != nil {
+					return err
+				}
+				actualKey, keyErr := fileid.FileKeyOf(entry.file)
+				closeErr := entry.close()
+				if keyErr != nil {
+					return keyErr
+				}
+				if actualKey != expectedKey {
+					return errors.New("reported hard-link name no longer names the admitted file")
+				}
+				return closeErr
+			}
+		}
+		return errors.New("held file has a name outside OA's own folders")
 	}
 }
 
@@ -126,7 +327,7 @@ func linkNames(p string) ([]string, error) {
 // before the first descriptor is written.
 var afterScan func()
 
-func protectModels(dir string, roots []string) error {
+func protectModelsAt(dir fileid.Handle, roots []fileid.Handle) error {
 	var held []*heldEntry
 	defer func() {
 		for _, e := range held {
@@ -134,7 +335,7 @@ func protectModels(dir string, roots []string) error {
 			e.close()
 		}
 	}()
-	top, _, err := openEntry(dir)
+	top, _, err := reopenEntry(dir)
 	if err != nil {
 		return err
 	}
@@ -149,26 +350,20 @@ func protectModels(dir string, roots []string) error {
 		if !held[i].dir {
 			continue
 		}
-		children, err := os.ReadDir(held[i].path)
+		children, err := readHeldDirectory(held[i])
 		if err != nil {
 			return err
 		}
 		for _, c := range children {
 			p := filepath.Join(held[i].path, c.Name())
-			e, info, err := openEntry(p)
+			e, info, err := modelChildEntry(held[i], c.Name())
 			if err != nil {
 				return err
 			}
 			held = append(held, e)
 			if !e.dir && info.NumberOfLinks > 1 {
-				names, err := linkNames(p)
-				if err != nil {
-					return fmt.Errorf("%s has %d names, which could not be listed: %v", p, info.NumberOfLinks, err)
-				}
-				for _, other := range names {
-					if !under(other, roots) {
-						return fmt.Errorf("%s has another name, %s, outside OA's own folders", p, other)
-					}
+				if err := hardlinkParentsWithin(e, roots, info.NumberOfLinks); err != nil {
+					return fmt.Errorf("%s: %w", p, err)
 				}
 			}
 		}
@@ -205,14 +400,42 @@ func protectModels(dir string, roots []string) error {
 			return fmt.Errorf("%s: %w", e.path, err)
 		}
 	}
+	for _, e := range held[:1] {
+		sd, err := windows.GetSecurityInfo(e.h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			return err
+		}
+		if err := checkModelsDescriptor(sd, user.User.Sid); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func modelKnownFolders() []string {
+	var known []string
+	for _, id := range []*windows.KNOWNFOLDERID{windows.FOLDERID_Profile, windows.FOLDERID_Documents, windows.FOLDERID_Desktop,
+		windows.FOLDERID_Downloads, windows.FOLDERID_RoamingAppData, windows.FOLDERID_LocalAppData} {
+		p, err := windows.KnownFolderPath(id, 0)
+		if err != nil || p == "" {
+			if id == windows.FOLDERID_Profile {
+				return []string{""}
+			}
+			continue
+		}
+		known = append(known, p)
+		if id == windows.FOLDERID_RoamingAppData {
+			known = append(known, filepath.Dir(p))
+		}
+	}
+	return known
 }
 
 // checkModels refuses dir unless it is a directory with no reparse point,
 // owned by this account, with a protected DACL that allows only this
 // account, SYSTEM and Administrators.
-func checkModels(dir string) error {
-	e, _, err := openEntry(dir)
+func checkModelsAt(dir fileid.Handle) error {
+	e, _, err := reopenEntry(dir)
 	if err != nil {
 		return err
 	}
@@ -287,71 +510,4 @@ func checkModelsDescriptor(sd *windows.SECURITY_DESCRIPTOR, user *windows.SID) e
 		}
 	}
 	return nil
-}
-
-// checkRoot refuses this account's home, a folder holding it, its known
-// folders, a link or junction at root or above it, and a root that does
-// not resolve to itself.
-func checkRoot(root string) error {
-	var known []string
-	for _, id := range []*windows.KNOWNFOLDERID{windows.FOLDERID_Profile, windows.FOLDERID_Documents, windows.FOLDERID_Desktop,
-		windows.FOLDERID_Downloads, windows.FOLDERID_RoamingAppData, windows.FOLDERID_LocalAppData} {
-		if p, err := windows.KnownFolderPath(id, 0); err == nil && p != "" {
-			known = append(known, filepath.Clean(p))
-			if id == windows.FOLDERID_RoamingAppData {
-				known = append(known, filepath.Dir(filepath.Clean(p)))
-			}
-		}
-	}
-	for _, k := range known {
-		if same, err := identity.SameFile(root, k); err == nil && same {
-			return fmt.Errorf("it is the known folder %s", k)
-		}
-	}
-	if len(known) > 0 && holds(root, known[:1]) {
-		return fmt.Errorf("it holds this account's home %s", known[0])
-	}
-	for p := root; ; p = filepath.Dir(p) {
-		name, err := windows.UTF16PtrFromString(extendedPath(p))
-		if err != nil {
-			return err
-		}
-		attributes, err := windows.GetFileAttributes(name)
-		if err != nil {
-			return fmt.Errorf("%s: %w", p, err)
-		}
-		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return fmt.Errorf("%s is a link or junction", p)
-		}
-		if filepath.Dir(p) == p {
-			break
-		}
-	}
-	e, _, err := openEntry(root)
-	if err != nil {
-		return err
-	}
-	//unchecked: the handle carries no data access
-	defer e.close()
-	if !e.dir {
-		return errors.New("it is not a directory")
-	}
-	buf := make([]uint16, 512)
-	for {
-		n, err := windows.GetFinalPathNameByHandle(e.h, &buf[0], uint32(len(buf)), 0)
-		if err != nil {
-			return err
-		}
-		if int(n) < len(buf) {
-			// A spelling check on purpose: root and its final path are one
-			// folder by construction, and the question is whether root is
-			// spelled as its final name (no 8.3 alias, substituted drive or
-			// mount point left in it), which only the names answer.
-			if final := plainFinal(windows.UTF16ToString(buf[:n])); !identity.SamePathName(final, root) {
-				return fmt.Errorf("it resolves to %s", final)
-			}
-			return nil
-		}
-		buf = make([]uint16, n+1)
-	}
 }

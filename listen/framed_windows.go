@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io/fs"
 	"net"
-	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -43,7 +42,11 @@ func dialPipeContext(ctx context.Context, name string, legacy bool) (net.Conn, e
 				windows.CloseHandle(h)
 				return nil, ctx.Err()
 			}
-			return fileConn{os.NewFile(uintptr(h), name)}, nil
+			file, _, err := adoptPipeFile(syscall.Handle(h), name)
+			if err != nil {
+				return nil, err
+			}
+			return fileConn{file}, nil
 		}
 		if !errors.Is(err, errPipeBusy) {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: err}

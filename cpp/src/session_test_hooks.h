@@ -5,6 +5,7 @@
 // that cannot be induced reliably through a real local socket or pipe.
 #ifdef ABSTRACTION_IPC_TEST_HOOKS
 #include <abstraction/ipc/client.h>
+#include <atomic>
 #include <chrono>
 #include <string>
 
@@ -14,5 +15,7 @@ using SessionOpenHook = oa_ipc_status (*)(const std::string&, std::chrono::stead
     oa_ipc_cancellation*, const oa_ipc_server_expectation*, oa_ipc_connection**);
 extern OA_IPC_API SessionWriteHook session_test_write;
 extern OA_IPC_API SessionOpenHook session_test_open;
+// Files the server guard opened to read an image identity.
+extern OA_IPC_API std::atomic<int> server_guard_test_opens;
 }}
 #endif

@@ -29,6 +29,7 @@ package identity
 // CONTRACT.md.
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -209,8 +210,15 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 		readable   = true // there is a live process worth reading /proc for
 		derivedWhy string // why path and package come out at the strength they do
 	)
-	pidfd, pidfdErr := unix.GetsockoptInt(fd, unix.SOL_SOCKET, soPeerPIDFD)
+	pidfd, pidfdErr := peerPIDFD(fd)
 	switch {
+	case pidfdErr != nil && !errors.Is(pidfdErr, unix.ENOPROTOOPT):
+		// Only "option unknown" means a kernel without SO_PEERPIDFD. Any
+		// other errno is a pinning call that failed on a kernel that has
+		// it, and falling back to an unpinned /proc read there would hand
+		// out a weaker answer for a fault nobody explained (ID-U5).
+		readable = false
+		derivedWhy = "SO_PEERPIDFD failed unexpectedly (" + pidfdErr.Error() + "), so the process could not be pinned and nothing was read out of the pid"
 	case pidfdErr == nil:
 		defer unix.Close(pidfd)
 		live, err := pidfdAlive(pidfd, pid)
@@ -270,7 +278,8 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 	p.Process = attr("process", proc, ProofKernel, processWhy)
 
 	if !readable {
-		// The peer is gone, or the pidfd could not be checked. The pid
+		// The peer is gone, the pidfd could not be checked, or
+		// SO_PEERPIDFD failed with an unexpected errno. The pid
 		// stays at ProofKernel - it is a fact about the connection - but
 		// nothing is read out of it.
 		p.Path = unknown[string]("path", derivedWhy)
@@ -310,6 +319,9 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 	} else {
 		p.Package = attr("package", name, derived, why+"; "+derivedWhy+"; "+whyPackageAdvisory)
 		p.note("package: %s", whyPackageAdvisory)
+		if s, ok := sandboxOf(name); ok {
+			p.Sandbox = attr("sandbox", s, derived, why+"; "+derivedWhy+"; "+whyPackageAdvisory)
+		}
 	}
 
 	// 9. Code. There is nothing to verify against.
@@ -382,3 +394,9 @@ func meaningfulLSMLabel(s string) bool {
 // only so that a test can point it at an option this kernel does not have, and
 // exercise the pre-6.5 path on a kernel that has it. Nothing else may write it.
 var soPeerPIDFD = unix.SO_PEERPIDFD
+
+// peerPIDFD asks the kernel for the peer's pidfd. It is a variable only so a
+// test can inject an errno; nothing else may write it.
+var peerPIDFD = func(fd int) (int, error) {
+	return unix.GetsockoptInt(fd, unix.SOL_SOCKET, soPeerPIDFD)
+}

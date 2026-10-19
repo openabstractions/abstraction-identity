@@ -243,12 +243,91 @@ func (b *xpcBinder) alive() (bool, error) {
 }
 func (b *xpcBinder) release() error { return nil }
 
+func xpcProcessError(status C.oa_xpc_status, security C.int32_t) error {
+	if status == C.OA_XPC_OCCURRENCE_ENDED {
+		return ErrPeerGone
+	}
+	if status == C.OA_XPC_SYSTEM {
+		return fmt.Errorf("identity: retained XPC occurrence: Security OSStatus %d", int32(security))
+	}
+	return xpcError(status)
+}
+
+func (b *xpcBinder) retainProcess() (binder, error) {
+	if b.request == nil {
+		return nil, net.ErrClosed
+	}
+	native, ok := b.request.acquire()
+	if !ok {
+		return nil, net.ErrClosed
+	}
+	defer b.request.calls.Done()
+	var process *C.oa_xpc_process
+	var security C.int32_t
+	status := C.oa_xpc_request_retain_process(native, &process, &security)
+	runtime.KeepAlive(b.request)
+	if err := xpcProcessError(status, security); err != nil {
+		return nil, err
+	}
+	return &xpcProcessPin{native: process}, nil
+}
+
+// xpcProcessPin owns one dynamic code occurrence. bindingState serializes its
+// checks/duplicate acquisitions against release. It never holds the request,
+// connection or a PID lookup path.
+type xpcProcessPin struct{ native *C.oa_xpc_process }
+
+func (p *xpcProcessPin) status() (C.oa_xpc_status, C.int32_t) {
+	var security C.int32_t
+	status := C.oa_xpc_process_check(p.native, &security)
+	return status, security
+}
+func (p *xpcProcessPin) recheck() error {
+	status, security := p.status()
+	// Exit and exec both end this captured occurrence. Peer remains its
+	// historical capture; active authority always requires Alive as well.
+	if status == C.OA_XPC_OCCURRENCE_ENDED {
+		return nil
+	}
+	return xpcProcessError(status, security)
+}
+func (p *xpcProcessPin) alive() (bool, error) {
+	status, security := p.status()
+	if status == C.OA_XPC_OCCURRENCE_ENDED {
+		return false, nil
+	}
+	if err := xpcProcessError(status, security); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+func (p *xpcProcessPin) retainProcess() (binder, error) {
+	var process *C.oa_xpc_process
+	var security C.int32_t
+	status := C.oa_xpc_process_retain(p.native, &process, &security)
+	if err := xpcProcessError(status, security); err != nil {
+		return nil, err
+	}
+	return &xpcProcessPin{native: process}, nil
+}
+func (p *xpcProcessPin) release() error {
+	C.oa_xpc_process_free(p.native)
+	p.native = nil
+	return nil
+}
+
 func xpcCeiling() (Limits, error) {
 	if C.oa_xpc_available() == 0 {
 		return Limits{}, fmt.Errorf("%w: XPC requires macOS 12 or newer", ErrUnsupportedConn)
 	}
 	return xpcLimits(), nil
 }
+
+// BindMessage binds the sender of one received message [ID-B4], the name a
+// per-message binding takes on every platform (identity corpus N1). On macOS
+// the message is an XPC request, and BindMessage is BindXPCRequest, which
+// keeps its name as the macOS form.
+func BindMessage(request *XPCRequest) (*Binding, error) { return BindXPCRequest(request) }
 
 // BindXPCRequest builds identity only from the native core's validation of this
 // exact received XPC dictionary. Callers cannot supply identity field values.

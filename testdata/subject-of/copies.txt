@@ -1,0 +1,953 @@
+# Answers of the subject copies SubjectOf replaced (origin/next 0e19c52de),
+# per named row and site: row<TAB>site<TAB>answer. Written by
+# go test -run TestSubjectCopiesRecordedAnswers -update-subject-copies.
+messy-program	asks/go/application/receiver.go:26	ok posix:1000 <program>
+messy-program	config/go/service/service.go:171	ok posix:1000 
+messy-program	conformance/clients/facade/host.go:91	ok posix:1000 
+messy-program	conformance/clients/router/server.go:72	ok posix:1000 
+messy-program	credentials/go/service/host.go:155	ok posix:1000 <program>
+messy-program	examples/rights-playground/main.go:250	ok posix:1000 
+messy-program	facade/go-core/resolution/caller.go:21	ok posix:1000 <messy>
+messy-program	facade/go/runtime/host.go:815	ok posix:1000 
+messy-program	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+messy-program	facade/go/runtime/jobs.go:99	ok posix:1000 <messy>
+messy-program	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+messy-program	inference/go/service/host.go:276	ok posix:1000 <program>
+messy-program	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+messy-program	logging/go/service/application_history.go:74	ok posix:1000 <program>
+messy-program	logging/go/service/service.go:203	ok posix:1000 <program>
+messy-program	logging/go/service/service.go:260	ok posix:1000 
+messy-program	model/go/service/service.go:173	ok posix:1000 
+messy-program	model/go/service/service.go:224	ok posix:1000 <program>
+messy-program	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+messy-program	resource/go/service/leases_host.go:47	ok posix:1000 <program>
+messy-program	rights/go/client/authorization.go:30	ok posix:1000 <program>
+messy-program	serve/opencode_session_windows.go:278	refused
+messy-program	serve/runtime_logging.go:25	ok posix:1000 
+messy-program	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+messy-program	storage/go/service/service.go:343	ok posix:1000 <program>
+missing-program	asks/go/application/receiver.go:26	refused:program
+missing-program	config/go/service/service.go:171	ok posix:1000 
+missing-program	conformance/clients/facade/host.go:91	ok posix:1000 
+missing-program	conformance/clients/router/server.go:72	ok posix:1000 
+missing-program	credentials/go/service/host.go:155	refused
+missing-program	examples/rights-playground/main.go:250	ok posix:1000 
+missing-program	facade/go-core/resolution/caller.go:21	refused
+missing-program	facade/go/runtime/host.go:815	ok posix:1000 
+missing-program	facade/go/runtime/jobs.go:129	refused:program
+missing-program	facade/go/runtime/jobs.go:99	refused:program
+missing-program	inference/adapters/go/gateway/window.go:494	refused
+missing-program	inference/go/service/host.go:276	refused
+missing-program	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+missing-program	logging/go/service/application_history.go:74	refused:native_program
+missing-program	logging/go/service/service.go:203	refused
+missing-program	logging/go/service/service.go:260	ok posix:1000 
+missing-program	model/go/service/service.go:173	ok posix:1000 
+missing-program	model/go/service/service.go:224	refused
+missing-program	provider-modelbridge/go/service/host.go:162	refused:identity_required
+missing-program	resource/go/service/leases_host.go:47	refused
+missing-program	rights/go/client/authorization.go:30	refused
+missing-program	serve/opencode_session_windows.go:278	refused
+missing-program	serve/runtime_logging.go:25	ok posix:1000 
+missing-program	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+missing-program	storage/go/service/service.go:343	refused
+nil-peer	asks/go/application/receiver.go:26	refused:caller_required
+nil-peer	config/go/service/service.go:171	panic
+nil-peer	conformance/clients/facade/host.go:91	panic
+nil-peer	conformance/clients/router/server.go:72	panic
+nil-peer	credentials/go/service/host.go:155	refused
+nil-peer	examples/rights-playground/main.go:250	panic
+nil-peer	facade/go-core/resolution/caller.go:21	refused
+nil-peer	facade/go/runtime/host.go:815	panic
+nil-peer	facade/go/runtime/jobs.go:129	refused:caller_evidence
+nil-peer	facade/go/runtime/jobs.go:99	refused:caller_evidence
+nil-peer	inference/adapters/go/gateway/window.go:494	refused
+nil-peer	inference/go/service/host.go:276	refused
+nil-peer	job/go/acceptanceprovider/link.go:69	refused
+nil-peer	logging/go/service/application_history.go:74	panic
+nil-peer	logging/go/service/service.go:203	panic
+nil-peer	logging/go/service/service.go:260	panic
+nil-peer	model/go/service/service.go:173	panic
+nil-peer	model/go/service/service.go:224	panic
+nil-peer	provider-modelbridge/go/service/host.go:162	panic
+nil-peer	resource/go/service/leases_host.go:47	refused
+nil-peer	rights/go/client/authorization.go:30	refused
+nil-peer	serve/opencode_session_windows.go:278	panic
+nil-peer	serve/runtime_logging.go:25	panic
+nil-peer	storage-over-local-stores/go/service/host.go:145	panic
+nil-peer	storage/go/service/service.go:343	refused
+no-kind	asks/go/application/receiver.go:26	refused:account acct=
+no-kind	config/go/service/service.go:171	refused:wrong_user acct=
+no-kind	conformance/clients/facade/host.go:91	refused acct=
+no-kind	conformance/clients/router/server.go:72	ok :1000 
+no-kind	credentials/go/service/host.go:155	refused
+no-kind	examples/rights-playground/main.go:250	ok : 
+no-kind	facade/go-core/resolution/caller.go:21	ok :1000 <program>
+no-kind	facade/go/runtime/host.go:815	ok :1000 
+no-kind	facade/go/runtime/jobs.go:129	refused:another_owner acct=
+no-kind	facade/go/runtime/jobs.go:99	refused:another_owner acct=
+no-kind	inference/adapters/go/gateway/window.go:494	refused
+no-kind	inference/go/service/host.go:276	refused
+no-kind	job/go/acceptanceprovider/link.go:69	ok :1000 
+no-kind	logging/go/service/application_history.go:74	refused:wrong_user acct=
+no-kind	logging/go/service/service.go:203	ok : <program>
+no-kind	logging/go/service/service.go:260	refused:wrong_user acct=
+no-kind	model/go/service/service.go:173	refused acct=
+no-kind	model/go/service/service.go:224	refused
+no-kind	provider-modelbridge/go/service/host.go:162	refused:forbidden acct=
+no-kind	resource/go/service/leases_host.go:47	refused
+no-kind	rights/go/client/authorization.go:30	refused
+no-kind	serve/opencode_session_windows.go:278	refused
+no-kind	serve/runtime_logging.go:25	refused
+no-kind	storage-over-local-stores/go/service/host.go:145	refused:forbidden acct=
+no-kind	storage/go/service/service.go:343	refused acct=
+path-proof-bound	asks/go/application/receiver.go:26	ok posix:1000 <program>
+path-proof-bound	config/go/service/service.go:171	ok posix:1000 
+path-proof-bound	conformance/clients/facade/host.go:91	ok posix:1000 
+path-proof-bound	conformance/clients/router/server.go:72	ok posix:1000 
+path-proof-bound	credentials/go/service/host.go:155	ok posix:1000 <program>
+path-proof-bound	examples/rights-playground/main.go:250	ok posix:1000 
+path-proof-bound	facade/go-core/resolution/caller.go:21	ok posix:1000 <program>
+path-proof-bound	facade/go/runtime/host.go:815	ok posix:1000 
+path-proof-bound	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+path-proof-bound	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+path-proof-bound	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+path-proof-bound	inference/go/service/host.go:276	ok posix:1000 <program>
+path-proof-bound	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+path-proof-bound	logging/go/service/application_history.go:74	ok posix:1000 <program>
+path-proof-bound	logging/go/service/service.go:203	ok posix:1000 <program>
+path-proof-bound	logging/go/service/service.go:260	ok posix:1000 
+path-proof-bound	model/go/service/service.go:173	ok posix:1000 
+path-proof-bound	model/go/service/service.go:224	ok posix:1000 <program>
+path-proof-bound	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+path-proof-bound	resource/go/service/leases_host.go:47	ok posix:1000 <program>
+path-proof-bound	rights/go/client/authorization.go:30	ok posix:1000 <program>
+path-proof-bound	serve/opencode_session_windows.go:278	refused
+path-proof-bound	serve/runtime_logging.go:25	ok posix:1000 
+path-proof-bound	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+path-proof-bound	storage/go/service/service.go:343	ok posix:1000 <program>
+path-proof-claimed	asks/go/application/receiver.go:26	refused:program
+path-proof-claimed	config/go/service/service.go:171	ok posix:1000 
+path-proof-claimed	conformance/clients/facade/host.go:91	ok posix:1000 
+path-proof-claimed	conformance/clients/router/server.go:72	ok posix:1000 
+path-proof-claimed	credentials/go/service/host.go:155	refused
+path-proof-claimed	examples/rights-playground/main.go:250	ok posix:1000 
+path-proof-claimed	facade/go-core/resolution/caller.go:21	refused
+path-proof-claimed	facade/go/runtime/host.go:815	ok posix:1000 
+path-proof-claimed	facade/go/runtime/jobs.go:129	refused:program
+path-proof-claimed	facade/go/runtime/jobs.go:99	refused:program
+path-proof-claimed	inference/adapters/go/gateway/window.go:494	refused
+path-proof-claimed	inference/go/service/host.go:276	refused
+path-proof-claimed	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+path-proof-claimed	logging/go/service/application_history.go:74	refused:native_program
+path-proof-claimed	logging/go/service/service.go:203	refused
+path-proof-claimed	logging/go/service/service.go:260	ok posix:1000 
+path-proof-claimed	model/go/service/service.go:173	ok posix:1000 
+path-proof-claimed	model/go/service/service.go:224	refused
+path-proof-claimed	provider-modelbridge/go/service/host.go:162	refused:identity_required
+path-proof-claimed	resource/go/service/leases_host.go:47	refused
+path-proof-claimed	rights/go/client/authorization.go:30	refused
+path-proof-claimed	serve/opencode_session_windows.go:278	refused
+path-proof-claimed	serve/runtime_logging.go:25	ok posix:1000 
+path-proof-claimed	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+path-proof-claimed	storage/go/service/service.go:343	refused
+path-proof-invalid	asks/go/application/receiver.go:26	refused:program
+path-proof-invalid	config/go/service/service.go:171	ok posix:1000 
+path-proof-invalid	conformance/clients/facade/host.go:91	ok posix:1000 
+path-proof-invalid	conformance/clients/router/server.go:72	ok posix:1000 
+path-proof-invalid	credentials/go/service/host.go:155	refused
+path-proof-invalid	examples/rights-playground/main.go:250	ok posix:1000 
+path-proof-invalid	facade/go-core/resolution/caller.go:21	refused
+path-proof-invalid	facade/go/runtime/host.go:815	ok posix:1000 
+path-proof-invalid	facade/go/runtime/jobs.go:129	refused:program
+path-proof-invalid	facade/go/runtime/jobs.go:99	refused:program
+path-proof-invalid	inference/adapters/go/gateway/window.go:494	refused
+path-proof-invalid	inference/go/service/host.go:276	refused
+path-proof-invalid	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+path-proof-invalid	logging/go/service/application_history.go:74	refused:native_program
+path-proof-invalid	logging/go/service/service.go:203	refused
+path-proof-invalid	logging/go/service/service.go:260	ok posix:1000 
+path-proof-invalid	model/go/service/service.go:173	ok posix:1000 
+path-proof-invalid	model/go/service/service.go:224	refused
+path-proof-invalid	provider-modelbridge/go/service/host.go:162	refused:identity_required
+path-proof-invalid	resource/go/service/leases_host.go:47	refused
+path-proof-invalid	rights/go/client/authorization.go:30	refused
+path-proof-invalid	serve/opencode_session_windows.go:278	refused
+path-proof-invalid	serve/runtime_logging.go:25	ok posix:1000 
+path-proof-invalid	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+path-proof-invalid	storage/go/service/service.go:343	refused
+path-proof-kernel	asks/go/application/receiver.go:26	ok posix:1000 <program>
+path-proof-kernel	config/go/service/service.go:171	ok posix:1000 
+path-proof-kernel	conformance/clients/facade/host.go:91	ok posix:1000 
+path-proof-kernel	conformance/clients/router/server.go:72	ok posix:1000 
+path-proof-kernel	credentials/go/service/host.go:155	ok posix:1000 <program>
+path-proof-kernel	examples/rights-playground/main.go:250	ok posix:1000 
+path-proof-kernel	facade/go-core/resolution/caller.go:21	ok posix:1000 <program>
+path-proof-kernel	facade/go/runtime/host.go:815	ok posix:1000 
+path-proof-kernel	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+path-proof-kernel	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+path-proof-kernel	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+path-proof-kernel	inference/go/service/host.go:276	ok posix:1000 <program>
+path-proof-kernel	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+path-proof-kernel	logging/go/service/application_history.go:74	ok posix:1000 <program>
+path-proof-kernel	logging/go/service/service.go:203	ok posix:1000 <program>
+path-proof-kernel	logging/go/service/service.go:260	ok posix:1000 
+path-proof-kernel	model/go/service/service.go:173	ok posix:1000 
+path-proof-kernel	model/go/service/service.go:224	ok posix:1000 <program>
+path-proof-kernel	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+path-proof-kernel	resource/go/service/leases_host.go:47	ok posix:1000 <program>
+path-proof-kernel	rights/go/client/authorization.go:30	ok posix:1000 <program>
+path-proof-kernel	serve/opencode_session_windows.go:278	refused
+path-proof-kernel	serve/runtime_logging.go:25	ok posix:1000 
+path-proof-kernel	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+path-proof-kernel	storage/go/service/service.go:343	ok posix:1000 <program>
+path-proof-none	asks/go/application/receiver.go:26	refused:program
+path-proof-none	config/go/service/service.go:171	ok posix:1000 
+path-proof-none	conformance/clients/facade/host.go:91	ok posix:1000 
+path-proof-none	conformance/clients/router/server.go:72	ok posix:1000 
+path-proof-none	credentials/go/service/host.go:155	refused
+path-proof-none	examples/rights-playground/main.go:250	ok posix:1000 
+path-proof-none	facade/go-core/resolution/caller.go:21	refused
+path-proof-none	facade/go/runtime/host.go:815	ok posix:1000 
+path-proof-none	facade/go/runtime/jobs.go:129	refused:program
+path-proof-none	facade/go/runtime/jobs.go:99	refused:program
+path-proof-none	inference/adapters/go/gateway/window.go:494	refused
+path-proof-none	inference/go/service/host.go:276	refused
+path-proof-none	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+path-proof-none	logging/go/service/application_history.go:74	refused:native_program
+path-proof-none	logging/go/service/service.go:203	refused
+path-proof-none	logging/go/service/service.go:260	ok posix:1000 
+path-proof-none	model/go/service/service.go:173	ok posix:1000 
+path-proof-none	model/go/service/service.go:224	refused
+path-proof-none	provider-modelbridge/go/service/host.go:162	refused:identity_required
+path-proof-none	resource/go/service/leases_host.go:47	refused
+path-proof-none	rights/go/client/authorization.go:30	refused
+path-proof-none	serve/opencode_session_windows.go:278	refused
+path-proof-none	serve/runtime_logging.go:25	ok posix:1000 
+path-proof-none	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+path-proof-none	storage/go/service/service.go:343	refused
+path-proof-pid	asks/go/application/receiver.go:26	refused:program
+path-proof-pid	config/go/service/service.go:171	ok posix:1000 
+path-proof-pid	conformance/clients/facade/host.go:91	ok posix:1000 
+path-proof-pid	conformance/clients/router/server.go:72	ok posix:1000 
+path-proof-pid	credentials/go/service/host.go:155	refused
+path-proof-pid	examples/rights-playground/main.go:250	ok posix:1000 
+path-proof-pid	facade/go-core/resolution/caller.go:21	refused
+path-proof-pid	facade/go/runtime/host.go:815	ok posix:1000 
+path-proof-pid	facade/go/runtime/jobs.go:129	refused:program
+path-proof-pid	facade/go/runtime/jobs.go:99	refused:program
+path-proof-pid	inference/adapters/go/gateway/window.go:494	refused
+path-proof-pid	inference/go/service/host.go:276	refused
+path-proof-pid	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+path-proof-pid	logging/go/service/application_history.go:74	refused:native_program
+path-proof-pid	logging/go/service/service.go:203	refused
+path-proof-pid	logging/go/service/service.go:260	ok posix:1000 
+path-proof-pid	model/go/service/service.go:173	ok posix:1000 
+path-proof-pid	model/go/service/service.go:224	refused
+path-proof-pid	provider-modelbridge/go/service/host.go:162	refused:identity_required
+path-proof-pid	resource/go/service/leases_host.go:47	refused
+path-proof-pid	rights/go/client/authorization.go:30	refused
+path-proof-pid	serve/opencode_session_windows.go:278	refused
+path-proof-pid	serve/runtime_logging.go:25	ok posix:1000 
+path-proof-pid	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+path-proof-pid	storage/go/service/service.go:343	refused
+path-proof-signed	asks/go/application/receiver.go:26	ok posix:1000 <program>
+path-proof-signed	config/go/service/service.go:171	ok posix:1000 
+path-proof-signed	conformance/clients/facade/host.go:91	ok posix:1000 
+path-proof-signed	conformance/clients/router/server.go:72	ok posix:1000 
+path-proof-signed	credentials/go/service/host.go:155	ok posix:1000 <program>
+path-proof-signed	examples/rights-playground/main.go:250	ok posix:1000 
+path-proof-signed	facade/go-core/resolution/caller.go:21	ok posix:1000 <program>
+path-proof-signed	facade/go/runtime/host.go:815	ok posix:1000 
+path-proof-signed	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+path-proof-signed	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+path-proof-signed	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+path-proof-signed	inference/go/service/host.go:276	ok posix:1000 <program>
+path-proof-signed	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+path-proof-signed	logging/go/service/application_history.go:74	ok posix:1000 <program>
+path-proof-signed	logging/go/service/service.go:203	ok posix:1000 <program>
+path-proof-signed	logging/go/service/service.go:260	ok posix:1000 
+path-proof-signed	model/go/service/service.go:173	ok posix:1000 
+path-proof-signed	model/go/service/service.go:224	ok posix:1000 <program>
+path-proof-signed	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+path-proof-signed	resource/go/service/leases_host.go:47	ok posix:1000 <program>
+path-proof-signed	rights/go/client/authorization.go:30	ok posix:1000 <program>
+path-proof-signed	serve/opencode_session_windows.go:278	refused
+path-proof-signed	serve/runtime_logging.go:25	ok posix:1000 
+path-proof-signed	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+path-proof-signed	storage/go/service/service.go:343	ok posix:1000 <program>
+path-proof-unmet	asks/go/application/receiver.go:26	refused:program
+path-proof-unmet	config/go/service/service.go:171	ok posix:1000 
+path-proof-unmet	conformance/clients/facade/host.go:91	ok posix:1000 
+path-proof-unmet	conformance/clients/router/server.go:72	ok posix:1000 
+path-proof-unmet	credentials/go/service/host.go:155	refused
+path-proof-unmet	examples/rights-playground/main.go:250	ok posix:1000 
+path-proof-unmet	facade/go-core/resolution/caller.go:21	refused
+path-proof-unmet	facade/go/runtime/host.go:815	ok posix:1000 
+path-proof-unmet	facade/go/runtime/jobs.go:129	refused:program
+path-proof-unmet	facade/go/runtime/jobs.go:99	refused:program
+path-proof-unmet	inference/adapters/go/gateway/window.go:494	refused
+path-proof-unmet	inference/go/service/host.go:276	refused
+path-proof-unmet	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+path-proof-unmet	logging/go/service/application_history.go:74	refused:native_program
+path-proof-unmet	logging/go/service/service.go:203	refused
+path-proof-unmet	logging/go/service/service.go:260	ok posix:1000 
+path-proof-unmet	model/go/service/service.go:173	ok posix:1000 
+path-proof-unmet	model/go/service/service.go:224	refused
+path-proof-unmet	provider-modelbridge/go/service/host.go:162	refused:identity_required
+path-proof-unmet	resource/go/service/leases_host.go:47	refused
+path-proof-unmet	rights/go/client/authorization.go:30	refused
+path-proof-unmet	serve/opencode_session_windows.go:278	refused
+path-proof-unmet	serve/runtime_logging.go:25	ok posix:1000 
+path-proof-unmet	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+path-proof-unmet	storage/go/service/service.go:343	refused
+path-proof-unsigned	asks/go/application/receiver.go:26	refused:program
+path-proof-unsigned	config/go/service/service.go:171	ok posix:1000 
+path-proof-unsigned	conformance/clients/facade/host.go:91	ok posix:1000 
+path-proof-unsigned	conformance/clients/router/server.go:72	ok posix:1000 
+path-proof-unsigned	credentials/go/service/host.go:155	refused
+path-proof-unsigned	examples/rights-playground/main.go:250	ok posix:1000 
+path-proof-unsigned	facade/go-core/resolution/caller.go:21	refused
+path-proof-unsigned	facade/go/runtime/host.go:815	ok posix:1000 
+path-proof-unsigned	facade/go/runtime/jobs.go:129	refused:program
+path-proof-unsigned	facade/go/runtime/jobs.go:99	refused:program
+path-proof-unsigned	inference/adapters/go/gateway/window.go:494	refused
+path-proof-unsigned	inference/go/service/host.go:276	refused
+path-proof-unsigned	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+path-proof-unsigned	logging/go/service/application_history.go:74	refused:native_program
+path-proof-unsigned	logging/go/service/service.go:203	refused
+path-proof-unsigned	logging/go/service/service.go:260	ok posix:1000 
+path-proof-unsigned	model/go/service/service.go:173	ok posix:1000 
+path-proof-unsigned	model/go/service/service.go:224	refused
+path-proof-unsigned	provider-modelbridge/go/service/host.go:162	refused:identity_required
+path-proof-unsigned	resource/go/service/leases_host.go:47	refused
+path-proof-unsigned	rights/go/client/authorization.go:30	refused
+path-proof-unsigned	serve/opencode_session_windows.go:278	refused
+path-proof-unsigned	serve/runtime_logging.go:25	ok posix:1000 
+path-proof-unsigned	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+path-proof-unsigned	storage/go/service/service.go:343	refused
+posix-negative-uid	asks/go/application/receiver.go:26	refused:account acct=
+posix-negative-uid	config/go/service/service.go:171	refused:wrong_user acct=-1
+posix-negative-uid	conformance/clients/facade/host.go:91	refused acct=-1
+posix-negative-uid	conformance/clients/router/server.go:72	refused acct=-1
+posix-negative-uid	credentials/go/service/host.go:155	refused
+posix-negative-uid	examples/rights-playground/main.go:250	ok posix:-1 
+posix-negative-uid	facade/go-core/resolution/caller.go:21	ok posix:-1 <program>
+posix-negative-uid	facade/go/runtime/host.go:815	refused acct=-1
+posix-negative-uid	facade/go/runtime/jobs.go:129	refused:another_owner acct=
+posix-negative-uid	facade/go/runtime/jobs.go:99	refused:another_owner acct=
+posix-negative-uid	inference/adapters/go/gateway/window.go:494	refused
+posix-negative-uid	inference/go/service/host.go:276	refused
+posix-negative-uid	job/go/acceptanceprovider/link.go:69	refused
+posix-negative-uid	logging/go/service/application_history.go:74	refused:wrong_user acct=-1
+posix-negative-uid	logging/go/service/service.go:203	ok posix:-1 <program>
+posix-negative-uid	logging/go/service/service.go:260	refused:wrong_user acct=-1
+posix-negative-uid	model/go/service/service.go:173	refused acct=-1
+posix-negative-uid	model/go/service/service.go:224	refused
+posix-negative-uid	provider-modelbridge/go/service/host.go:162	refused:forbidden acct=-1
+posix-negative-uid	resource/go/service/leases_host.go:47	refused
+posix-negative-uid	rights/go/client/authorization.go:30	refused
+posix-negative-uid	serve/opencode_session_windows.go:278	refused
+posix-negative-uid	serve/runtime_logging.go:25	ok posix:-1 
+posix-negative-uid	storage-over-local-stores/go/service/host.go:145	refused:forbidden acct=-1
+posix-negative-uid	storage/go/service/service.go:343	refused acct=
+posix-other-uid	asks/go/application/receiver.go:26	refused:account acct=0
+posix-other-uid	config/go/service/service.go:171	refused:wrong_user acct=0
+posix-other-uid	conformance/clients/facade/host.go:91	refused acct=0
+posix-other-uid	conformance/clients/router/server.go:72	refused acct=0
+posix-other-uid	credentials/go/service/host.go:155	ok posix:0 <program>
+posix-other-uid	examples/rights-playground/main.go:250	ok posix:0 
+posix-other-uid	facade/go-core/resolution/caller.go:21	ok posix:0 <program>
+posix-other-uid	facade/go/runtime/host.go:815	refused acct=0
+posix-other-uid	facade/go/runtime/jobs.go:129	refused:another_owner acct=0
+posix-other-uid	facade/go/runtime/jobs.go:99	refused:another_owner acct=0
+posix-other-uid	inference/adapters/go/gateway/window.go:494	ok posix:0 <program>
+posix-other-uid	inference/go/service/host.go:276	ok posix:0 <program>
+posix-other-uid	job/go/acceptanceprovider/link.go:69	refused acct=0
+posix-other-uid	logging/go/service/application_history.go:74	refused:wrong_user acct=0
+posix-other-uid	logging/go/service/service.go:203	ok posix:0 <program>
+posix-other-uid	logging/go/service/service.go:260	refused:wrong_user acct=0
+posix-other-uid	model/go/service/service.go:173	refused acct=0
+posix-other-uid	model/go/service/service.go:224	refused
+posix-other-uid	provider-modelbridge/go/service/host.go:162	refused:forbidden acct=0
+posix-other-uid	resource/go/service/leases_host.go:47	ok posix:0 <program>
+posix-other-uid	rights/go/client/authorization.go:30	ok posix:0 <program>
+posix-other-uid	serve/opencode_session_windows.go:278	refused
+posix-other-uid	serve/runtime_logging.go:25	ok posix:0 
+posix-other-uid	storage-over-local-stores/go/service/host.go:145	refused:forbidden acct=0
+posix-other-uid	storage/go/service/service.go:343	refused acct=0
+posix-uid	asks/go/application/receiver.go:26	ok posix:1000 <program>
+posix-uid	config/go/service/service.go:171	ok posix:1000 
+posix-uid	conformance/clients/facade/host.go:91	ok posix:1000 
+posix-uid	conformance/clients/router/server.go:72	ok posix:1000 
+posix-uid	credentials/go/service/host.go:155	ok posix:1000 <program>
+posix-uid	examples/rights-playground/main.go:250	ok posix:1000 
+posix-uid	facade/go-core/resolution/caller.go:21	ok posix:1000 <program>
+posix-uid	facade/go/runtime/host.go:815	ok posix:1000 
+posix-uid	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+posix-uid	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+posix-uid	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+posix-uid	inference/go/service/host.go:276	ok posix:1000 <program>
+posix-uid	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+posix-uid	logging/go/service/application_history.go:74	ok posix:1000 <program>
+posix-uid	logging/go/service/service.go:203	ok posix:1000 <program>
+posix-uid	logging/go/service/service.go:260	ok posix:1000 
+posix-uid	model/go/service/service.go:173	ok posix:1000 
+posix-uid	model/go/service/service.go:224	ok posix:1000 <program>
+posix-uid	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+posix-uid	resource/go/service/leases_host.go:47	ok posix:1000 <program>
+posix-uid	rights/go/client/authorization.go:30	ok posix:1000 <program>
+posix-uid	serve/opencode_session_windows.go:278	refused
+posix-uid	serve/runtime_logging.go:25	ok posix:1000 
+posix-uid	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+posix-uid	storage/go/service/service.go:343	ok posix:1000 <program>
+process-proof-bound	asks/go/application/receiver.go:26	ok posix:1000 <program>
+process-proof-bound	config/go/service/service.go:171	ok posix:1000 
+process-proof-bound	conformance/clients/facade/host.go:91	ok posix:1000 
+process-proof-bound	conformance/clients/router/server.go:72	ok posix:1000 
+process-proof-bound	credentials/go/service/host.go:155	refused
+process-proof-bound	examples/rights-playground/main.go:250	ok posix:1000 
+process-proof-bound	facade/go-core/resolution/caller.go:21	refused
+process-proof-bound	facade/go/runtime/host.go:815	ok posix:1000 
+process-proof-bound	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+process-proof-bound	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+process-proof-bound	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+process-proof-bound	inference/go/service/host.go:276	refused
+process-proof-bound	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+process-proof-bound	logging/go/service/application_history.go:74	ok posix:1000 <program>
+process-proof-bound	logging/go/service/service.go:203	refused
+process-proof-bound	logging/go/service/service.go:260	ok posix:1000 
+process-proof-bound	model/go/service/service.go:173	ok posix:1000 
+process-proof-bound	model/go/service/service.go:224	ok posix:1000 <program>
+process-proof-bound	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+process-proof-bound	resource/go/service/leases_host.go:47	refused
+process-proof-bound	rights/go/client/authorization.go:30	refused
+process-proof-bound	serve/opencode_session_windows.go:278	refused
+process-proof-bound	serve/runtime_logging.go:25	ok posix:1000 
+process-proof-bound	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+process-proof-bound	storage/go/service/service.go:343	ok posix:1000 <program>
+process-proof-claimed	asks/go/application/receiver.go:26	ok posix:1000 <program>
+process-proof-claimed	config/go/service/service.go:171	ok posix:1000 
+process-proof-claimed	conformance/clients/facade/host.go:91	ok posix:1000 
+process-proof-claimed	conformance/clients/router/server.go:72	ok posix:1000 
+process-proof-claimed	credentials/go/service/host.go:155	refused
+process-proof-claimed	examples/rights-playground/main.go:250	ok posix:1000 
+process-proof-claimed	facade/go-core/resolution/caller.go:21	refused
+process-proof-claimed	facade/go/runtime/host.go:815	ok posix:1000 
+process-proof-claimed	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+process-proof-claimed	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+process-proof-claimed	inference/adapters/go/gateway/window.go:494	refused
+process-proof-claimed	inference/go/service/host.go:276	refused
+process-proof-claimed	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+process-proof-claimed	logging/go/service/application_history.go:74	ok posix:1000 <program>
+process-proof-claimed	logging/go/service/service.go:203	refused
+process-proof-claimed	logging/go/service/service.go:260	ok posix:1000 
+process-proof-claimed	model/go/service/service.go:173	ok posix:1000 
+process-proof-claimed	model/go/service/service.go:224	ok posix:1000 <program>
+process-proof-claimed	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+process-proof-claimed	resource/go/service/leases_host.go:47	refused
+process-proof-claimed	rights/go/client/authorization.go:30	refused
+process-proof-claimed	serve/opencode_session_windows.go:278	refused
+process-proof-claimed	serve/runtime_logging.go:25	ok posix:1000 
+process-proof-claimed	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+process-proof-claimed	storage/go/service/service.go:343	ok posix:1000 <program>
+process-proof-invalid	asks/go/application/receiver.go:26	ok posix:1000 <program>
+process-proof-invalid	config/go/service/service.go:171	ok posix:1000 
+process-proof-invalid	conformance/clients/facade/host.go:91	ok posix:1000 
+process-proof-invalid	conformance/clients/router/server.go:72	ok posix:1000 
+process-proof-invalid	credentials/go/service/host.go:155	refused
+process-proof-invalid	examples/rights-playground/main.go:250	ok posix:1000 
+process-proof-invalid	facade/go-core/resolution/caller.go:21	refused
+process-proof-invalid	facade/go/runtime/host.go:815	ok posix:1000 
+process-proof-invalid	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+process-proof-invalid	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+process-proof-invalid	inference/adapters/go/gateway/window.go:494	refused
+process-proof-invalid	inference/go/service/host.go:276	refused
+process-proof-invalid	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+process-proof-invalid	logging/go/service/application_history.go:74	ok posix:1000 <program>
+process-proof-invalid	logging/go/service/service.go:203	refused
+process-proof-invalid	logging/go/service/service.go:260	ok posix:1000 
+process-proof-invalid	model/go/service/service.go:173	ok posix:1000 
+process-proof-invalid	model/go/service/service.go:224	ok posix:1000 <program>
+process-proof-invalid	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+process-proof-invalid	resource/go/service/leases_host.go:47	refused
+process-proof-invalid	rights/go/client/authorization.go:30	refused
+process-proof-invalid	serve/opencode_session_windows.go:278	refused
+process-proof-invalid	serve/runtime_logging.go:25	ok posix:1000 
+process-proof-invalid	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+process-proof-invalid	storage/go/service/service.go:343	ok posix:1000 <program>
+process-proof-kernel	asks/go/application/receiver.go:26	ok posix:1000 <program>
+process-proof-kernel	config/go/service/service.go:171	ok posix:1000 
+process-proof-kernel	conformance/clients/facade/host.go:91	ok posix:1000 
+process-proof-kernel	conformance/clients/router/server.go:72	ok posix:1000 
+process-proof-kernel	credentials/go/service/host.go:155	ok posix:1000 <program>
+process-proof-kernel	examples/rights-playground/main.go:250	ok posix:1000 
+process-proof-kernel	facade/go-core/resolution/caller.go:21	ok posix:1000 <program>
+process-proof-kernel	facade/go/runtime/host.go:815	ok posix:1000 
+process-proof-kernel	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+process-proof-kernel	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+process-proof-kernel	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+process-proof-kernel	inference/go/service/host.go:276	ok posix:1000 <program>
+process-proof-kernel	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+process-proof-kernel	logging/go/service/application_history.go:74	ok posix:1000 <program>
+process-proof-kernel	logging/go/service/service.go:203	ok posix:1000 <program>
+process-proof-kernel	logging/go/service/service.go:260	ok posix:1000 
+process-proof-kernel	model/go/service/service.go:173	ok posix:1000 
+process-proof-kernel	model/go/service/service.go:224	ok posix:1000 <program>
+process-proof-kernel	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+process-proof-kernel	resource/go/service/leases_host.go:47	ok posix:1000 <program>
+process-proof-kernel	rights/go/client/authorization.go:30	ok posix:1000 <program>
+process-proof-kernel	serve/opencode_session_windows.go:278	refused
+process-proof-kernel	serve/runtime_logging.go:25	ok posix:1000 
+process-proof-kernel	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+process-proof-kernel	storage/go/service/service.go:343	ok posix:1000 <program>
+process-proof-none	asks/go/application/receiver.go:26	ok posix:1000 <program>
+process-proof-none	config/go/service/service.go:171	ok posix:1000 
+process-proof-none	conformance/clients/facade/host.go:91	ok posix:1000 
+process-proof-none	conformance/clients/router/server.go:72	ok posix:1000 
+process-proof-none	credentials/go/service/host.go:155	refused
+process-proof-none	examples/rights-playground/main.go:250	ok posix:1000 
+process-proof-none	facade/go-core/resolution/caller.go:21	refused
+process-proof-none	facade/go/runtime/host.go:815	ok posix:1000 
+process-proof-none	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+process-proof-none	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+process-proof-none	inference/adapters/go/gateway/window.go:494	refused
+process-proof-none	inference/go/service/host.go:276	refused
+process-proof-none	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+process-proof-none	logging/go/service/application_history.go:74	ok posix:1000 <program>
+process-proof-none	logging/go/service/service.go:203	refused
+process-proof-none	logging/go/service/service.go:260	ok posix:1000 
+process-proof-none	model/go/service/service.go:173	ok posix:1000 
+process-proof-none	model/go/service/service.go:224	ok posix:1000 <program>
+process-proof-none	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+process-proof-none	resource/go/service/leases_host.go:47	refused
+process-proof-none	rights/go/client/authorization.go:30	refused
+process-proof-none	serve/opencode_session_windows.go:278	refused
+process-proof-none	serve/runtime_logging.go:25	ok posix:1000 
+process-proof-none	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+process-proof-none	storage/go/service/service.go:343	ok posix:1000 <program>
+process-proof-pid	asks/go/application/receiver.go:26	ok posix:1000 <program>
+process-proof-pid	config/go/service/service.go:171	ok posix:1000 
+process-proof-pid	conformance/clients/facade/host.go:91	ok posix:1000 
+process-proof-pid	conformance/clients/router/server.go:72	ok posix:1000 
+process-proof-pid	credentials/go/service/host.go:155	refused
+process-proof-pid	examples/rights-playground/main.go:250	ok posix:1000 
+process-proof-pid	facade/go-core/resolution/caller.go:21	refused
+process-proof-pid	facade/go/runtime/host.go:815	ok posix:1000 
+process-proof-pid	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+process-proof-pid	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+process-proof-pid	inference/adapters/go/gateway/window.go:494	refused
+process-proof-pid	inference/go/service/host.go:276	refused
+process-proof-pid	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+process-proof-pid	logging/go/service/application_history.go:74	ok posix:1000 <program>
+process-proof-pid	logging/go/service/service.go:203	refused
+process-proof-pid	logging/go/service/service.go:260	ok posix:1000 
+process-proof-pid	model/go/service/service.go:173	ok posix:1000 
+process-proof-pid	model/go/service/service.go:224	ok posix:1000 <program>
+process-proof-pid	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+process-proof-pid	resource/go/service/leases_host.go:47	refused
+process-proof-pid	rights/go/client/authorization.go:30	refused
+process-proof-pid	serve/opencode_session_windows.go:278	refused
+process-proof-pid	serve/runtime_logging.go:25	ok posix:1000 
+process-proof-pid	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+process-proof-pid	storage/go/service/service.go:343	ok posix:1000 <program>
+process-proof-signed	asks/go/application/receiver.go:26	ok posix:1000 <program>
+process-proof-signed	config/go/service/service.go:171	ok posix:1000 
+process-proof-signed	conformance/clients/facade/host.go:91	ok posix:1000 
+process-proof-signed	conformance/clients/router/server.go:72	ok posix:1000 
+process-proof-signed	credentials/go/service/host.go:155	ok posix:1000 <program>
+process-proof-signed	examples/rights-playground/main.go:250	ok posix:1000 
+process-proof-signed	facade/go-core/resolution/caller.go:21	ok posix:1000 <program>
+process-proof-signed	facade/go/runtime/host.go:815	ok posix:1000 
+process-proof-signed	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+process-proof-signed	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+process-proof-signed	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+process-proof-signed	inference/go/service/host.go:276	ok posix:1000 <program>
+process-proof-signed	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+process-proof-signed	logging/go/service/application_history.go:74	ok posix:1000 <program>
+process-proof-signed	logging/go/service/service.go:203	ok posix:1000 <program>
+process-proof-signed	logging/go/service/service.go:260	ok posix:1000 
+process-proof-signed	model/go/service/service.go:173	ok posix:1000 
+process-proof-signed	model/go/service/service.go:224	ok posix:1000 <program>
+process-proof-signed	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+process-proof-signed	resource/go/service/leases_host.go:47	ok posix:1000 <program>
+process-proof-signed	rights/go/client/authorization.go:30	ok posix:1000 <program>
+process-proof-signed	serve/opencode_session_windows.go:278	refused
+process-proof-signed	serve/runtime_logging.go:25	ok posix:1000 
+process-proof-signed	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+process-proof-signed	storage/go/service/service.go:343	ok posix:1000 <program>
+process-proof-unmet	asks/go/application/receiver.go:26	ok posix:1000 <program>
+process-proof-unmet	config/go/service/service.go:171	ok posix:1000 
+process-proof-unmet	conformance/clients/facade/host.go:91	ok posix:1000 
+process-proof-unmet	conformance/clients/router/server.go:72	ok posix:1000 
+process-proof-unmet	credentials/go/service/host.go:155	refused
+process-proof-unmet	examples/rights-playground/main.go:250	ok posix:1000 
+process-proof-unmet	facade/go-core/resolution/caller.go:21	refused
+process-proof-unmet	facade/go/runtime/host.go:815	ok posix:1000 
+process-proof-unmet	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+process-proof-unmet	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+process-proof-unmet	inference/adapters/go/gateway/window.go:494	refused
+process-proof-unmet	inference/go/service/host.go:276	refused
+process-proof-unmet	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+process-proof-unmet	logging/go/service/application_history.go:74	ok posix:1000 <program>
+process-proof-unmet	logging/go/service/service.go:203	refused
+process-proof-unmet	logging/go/service/service.go:260	ok posix:1000 
+process-proof-unmet	model/go/service/service.go:173	ok posix:1000 
+process-proof-unmet	model/go/service/service.go:224	ok posix:1000 <program>
+process-proof-unmet	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+process-proof-unmet	resource/go/service/leases_host.go:47	refused
+process-proof-unmet	rights/go/client/authorization.go:30	refused
+process-proof-unmet	serve/opencode_session_windows.go:278	refused
+process-proof-unmet	serve/runtime_logging.go:25	ok posix:1000 
+process-proof-unmet	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+process-proof-unmet	storage/go/service/service.go:343	ok posix:1000 <program>
+process-proof-unsigned	asks/go/application/receiver.go:26	ok posix:1000 <program>
+process-proof-unsigned	config/go/service/service.go:171	ok posix:1000 
+process-proof-unsigned	conformance/clients/facade/host.go:91	ok posix:1000 
+process-proof-unsigned	conformance/clients/router/server.go:72	ok posix:1000 
+process-proof-unsigned	credentials/go/service/host.go:155	refused
+process-proof-unsigned	examples/rights-playground/main.go:250	ok posix:1000 
+process-proof-unsigned	facade/go-core/resolution/caller.go:21	refused
+process-proof-unsigned	facade/go/runtime/host.go:815	ok posix:1000 
+process-proof-unsigned	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+process-proof-unsigned	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+process-proof-unsigned	inference/adapters/go/gateway/window.go:494	refused
+process-proof-unsigned	inference/go/service/host.go:276	refused
+process-proof-unsigned	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+process-proof-unsigned	logging/go/service/application_history.go:74	ok posix:1000 <program>
+process-proof-unsigned	logging/go/service/service.go:203	refused
+process-proof-unsigned	logging/go/service/service.go:260	ok posix:1000 
+process-proof-unsigned	model/go/service/service.go:173	ok posix:1000 
+process-proof-unsigned	model/go/service/service.go:224	ok posix:1000 <program>
+process-proof-unsigned	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+process-proof-unsigned	resource/go/service/leases_host.go:47	refused
+process-proof-unsigned	rights/go/client/authorization.go:30	refused
+process-proof-unsigned	serve/opencode_session_windows.go:278	refused
+process-proof-unsigned	serve/runtime_logging.go:25	ok posix:1000 
+process-proof-unsigned	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+process-proof-unsigned	storage/go/service/service.go:343	ok posix:1000 <program>
+relative-program	asks/go/application/receiver.go:26	refused:program
+relative-program	config/go/service/service.go:171	ok posix:1000 
+relative-program	conformance/clients/facade/host.go:91	ok posix:1000 
+relative-program	conformance/clients/router/server.go:72	ok posix:1000 
+relative-program	credentials/go/service/host.go:155	refused
+relative-program	examples/rights-playground/main.go:250	ok posix:1000 
+relative-program	facade/go-core/resolution/caller.go:21	ok posix:1000 app
+relative-program	facade/go/runtime/host.go:815	ok posix:1000 
+relative-program	facade/go/runtime/jobs.go:129	refused:program
+relative-program	facade/go/runtime/jobs.go:99	refused:program
+relative-program	inference/adapters/go/gateway/window.go:494	refused
+relative-program	inference/go/service/host.go:276	refused
+relative-program	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+relative-program	logging/go/service/application_history.go:74	refused:native_program
+relative-program	logging/go/service/service.go:203	refused
+relative-program	logging/go/service/service.go:260	ok posix:1000 
+relative-program	model/go/service/service.go:173	ok posix:1000 
+relative-program	model/go/service/service.go:224	refused
+relative-program	provider-modelbridge/go/service/host.go:162	refused:identity_required
+relative-program	resource/go/service/leases_host.go:47	refused
+relative-program	rights/go/client/authorization.go:30	refused
+relative-program	serve/opencode_session_windows.go:278	refused
+relative-program	serve/runtime_logging.go:25	ok posix:1000 
+relative-program	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+relative-program	storage/go/service/service.go:343	refused
+user-proof-bound	asks/go/application/receiver.go:26	refused:proof
+user-proof-bound	config/go/service/service.go:171	refused:identity_required
+user-proof-bound	conformance/clients/facade/host.go:91	refused
+user-proof-bound	conformance/clients/router/server.go:72	refused
+user-proof-bound	credentials/go/service/host.go:155	refused
+user-proof-bound	examples/rights-playground/main.go:250	ok posix:1000 
+user-proof-bound	facade/go-core/resolution/caller.go:21	refused
+user-proof-bound	facade/go/runtime/host.go:815	refused
+user-proof-bound	facade/go/runtime/jobs.go:129	refused:proof
+user-proof-bound	facade/go/runtime/jobs.go:99	refused:proof
+user-proof-bound	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+user-proof-bound	inference/go/service/host.go:276	refused
+user-proof-bound	job/go/acceptanceprovider/link.go:69	refused
+user-proof-bound	logging/go/service/application_history.go:74	refused:native_account
+user-proof-bound	logging/go/service/service.go:203	refused
+user-proof-bound	logging/go/service/service.go:260	refused:identity_required
+user-proof-bound	model/go/service/service.go:173	refused
+user-proof-bound	model/go/service/service.go:224	refused
+user-proof-bound	provider-modelbridge/go/service/host.go:162	refused:identity_required
+user-proof-bound	resource/go/service/leases_host.go:47	refused
+user-proof-bound	rights/go/client/authorization.go:30	refused
+user-proof-bound	serve/opencode_session_windows.go:278	refused
+user-proof-bound	serve/runtime_logging.go:25	ok posix:1000 
+user-proof-bound	storage-over-local-stores/go/service/host.go:145	refused:identity_required
+user-proof-bound	storage/go/service/service.go:343	refused
+user-proof-claimed	asks/go/application/receiver.go:26	refused:proof
+user-proof-claimed	config/go/service/service.go:171	refused:identity_required
+user-proof-claimed	conformance/clients/facade/host.go:91	refused
+user-proof-claimed	conformance/clients/router/server.go:72	refused
+user-proof-claimed	credentials/go/service/host.go:155	refused
+user-proof-claimed	examples/rights-playground/main.go:250	ok posix:1000 
+user-proof-claimed	facade/go-core/resolution/caller.go:21	refused
+user-proof-claimed	facade/go/runtime/host.go:815	refused
+user-proof-claimed	facade/go/runtime/jobs.go:129	refused:proof
+user-proof-claimed	facade/go/runtime/jobs.go:99	refused:proof
+user-proof-claimed	inference/adapters/go/gateway/window.go:494	refused
+user-proof-claimed	inference/go/service/host.go:276	refused
+user-proof-claimed	job/go/acceptanceprovider/link.go:69	refused
+user-proof-claimed	logging/go/service/application_history.go:74	refused:native_account
+user-proof-claimed	logging/go/service/service.go:203	refused
+user-proof-claimed	logging/go/service/service.go:260	refused:identity_required
+user-proof-claimed	model/go/service/service.go:173	refused
+user-proof-claimed	model/go/service/service.go:224	refused
+user-proof-claimed	provider-modelbridge/go/service/host.go:162	refused:identity_required
+user-proof-claimed	resource/go/service/leases_host.go:47	refused
+user-proof-claimed	rights/go/client/authorization.go:30	refused
+user-proof-claimed	serve/opencode_session_windows.go:278	refused
+user-proof-claimed	serve/runtime_logging.go:25	ok posix:1000 
+user-proof-claimed	storage-over-local-stores/go/service/host.go:145	refused:identity_required
+user-proof-claimed	storage/go/service/service.go:343	refused
+user-proof-invalid	asks/go/application/receiver.go:26	refused:proof
+user-proof-invalid	config/go/service/service.go:171	refused:identity_required
+user-proof-invalid	conformance/clients/facade/host.go:91	refused
+user-proof-invalid	conformance/clients/router/server.go:72	refused
+user-proof-invalid	credentials/go/service/host.go:155	refused
+user-proof-invalid	examples/rights-playground/main.go:250	ok posix:1000 
+user-proof-invalid	facade/go-core/resolution/caller.go:21	refused
+user-proof-invalid	facade/go/runtime/host.go:815	refused
+user-proof-invalid	facade/go/runtime/jobs.go:129	refused:proof
+user-proof-invalid	facade/go/runtime/jobs.go:99	refused:proof
+user-proof-invalid	inference/adapters/go/gateway/window.go:494	refused
+user-proof-invalid	inference/go/service/host.go:276	refused
+user-proof-invalid	job/go/acceptanceprovider/link.go:69	refused
+user-proof-invalid	logging/go/service/application_history.go:74	refused:native_account
+user-proof-invalid	logging/go/service/service.go:203	refused
+user-proof-invalid	logging/go/service/service.go:260	refused:identity_required
+user-proof-invalid	model/go/service/service.go:173	refused
+user-proof-invalid	model/go/service/service.go:224	refused
+user-proof-invalid	provider-modelbridge/go/service/host.go:162	refused:identity_required
+user-proof-invalid	resource/go/service/leases_host.go:47	refused
+user-proof-invalid	rights/go/client/authorization.go:30	refused
+user-proof-invalid	serve/opencode_session_windows.go:278	refused
+user-proof-invalid	serve/runtime_logging.go:25	ok posix:1000 
+user-proof-invalid	storage-over-local-stores/go/service/host.go:145	refused:identity_required
+user-proof-invalid	storage/go/service/service.go:343	refused
+user-proof-kernel	asks/go/application/receiver.go:26	ok posix:1000 <program>
+user-proof-kernel	config/go/service/service.go:171	ok posix:1000 
+user-proof-kernel	conformance/clients/facade/host.go:91	ok posix:1000 
+user-proof-kernel	conformance/clients/router/server.go:72	ok posix:1000 
+user-proof-kernel	credentials/go/service/host.go:155	ok posix:1000 <program>
+user-proof-kernel	examples/rights-playground/main.go:250	ok posix:1000 
+user-proof-kernel	facade/go-core/resolution/caller.go:21	ok posix:1000 <program>
+user-proof-kernel	facade/go/runtime/host.go:815	ok posix:1000 
+user-proof-kernel	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+user-proof-kernel	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+user-proof-kernel	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+user-proof-kernel	inference/go/service/host.go:276	ok posix:1000 <program>
+user-proof-kernel	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+user-proof-kernel	logging/go/service/application_history.go:74	ok posix:1000 <program>
+user-proof-kernel	logging/go/service/service.go:203	ok posix:1000 <program>
+user-proof-kernel	logging/go/service/service.go:260	ok posix:1000 
+user-proof-kernel	model/go/service/service.go:173	ok posix:1000 
+user-proof-kernel	model/go/service/service.go:224	ok posix:1000 <program>
+user-proof-kernel	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+user-proof-kernel	resource/go/service/leases_host.go:47	ok posix:1000 <program>
+user-proof-kernel	rights/go/client/authorization.go:30	ok posix:1000 <program>
+user-proof-kernel	serve/opencode_session_windows.go:278	refused
+user-proof-kernel	serve/runtime_logging.go:25	ok posix:1000 
+user-proof-kernel	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+user-proof-kernel	storage/go/service/service.go:343	ok posix:1000 <program>
+user-proof-none	asks/go/application/receiver.go:26	refused:proof
+user-proof-none	config/go/service/service.go:171	refused:identity_required
+user-proof-none	conformance/clients/facade/host.go:91	refused
+user-proof-none	conformance/clients/router/server.go:72	refused
+user-proof-none	credentials/go/service/host.go:155	refused
+user-proof-none	examples/rights-playground/main.go:250	refused
+user-proof-none	facade/go-core/resolution/caller.go:21	refused
+user-proof-none	facade/go/runtime/host.go:815	refused
+user-proof-none	facade/go/runtime/jobs.go:129	refused:proof
+user-proof-none	facade/go/runtime/jobs.go:99	refused:proof
+user-proof-none	inference/adapters/go/gateway/window.go:494	refused
+user-proof-none	inference/go/service/host.go:276	refused
+user-proof-none	job/go/acceptanceprovider/link.go:69	refused
+user-proof-none	logging/go/service/application_history.go:74	refused:native_account
+user-proof-none	logging/go/service/service.go:203	refused
+user-proof-none	logging/go/service/service.go:260	refused:identity_required
+user-proof-none	model/go/service/service.go:173	refused
+user-proof-none	model/go/service/service.go:224	refused
+user-proof-none	provider-modelbridge/go/service/host.go:162	refused:identity_required
+user-proof-none	resource/go/service/leases_host.go:47	refused
+user-proof-none	rights/go/client/authorization.go:30	refused
+user-proof-none	serve/opencode_session_windows.go:278	refused
+user-proof-none	serve/runtime_logging.go:25	refused
+user-proof-none	storage-over-local-stores/go/service/host.go:145	refused:identity_required
+user-proof-none	storage/go/service/service.go:343	refused
+user-proof-pid	asks/go/application/receiver.go:26	refused:proof
+user-proof-pid	config/go/service/service.go:171	refused:identity_required
+user-proof-pid	conformance/clients/facade/host.go:91	refused
+user-proof-pid	conformance/clients/router/server.go:72	refused
+user-proof-pid	credentials/go/service/host.go:155	refused
+user-proof-pid	examples/rights-playground/main.go:250	ok posix:1000 
+user-proof-pid	facade/go-core/resolution/caller.go:21	refused
+user-proof-pid	facade/go/runtime/host.go:815	refused
+user-proof-pid	facade/go/runtime/jobs.go:129	refused:proof
+user-proof-pid	facade/go/runtime/jobs.go:99	refused:proof
+user-proof-pid	inference/adapters/go/gateway/window.go:494	refused
+user-proof-pid	inference/go/service/host.go:276	refused
+user-proof-pid	job/go/acceptanceprovider/link.go:69	refused
+user-proof-pid	logging/go/service/application_history.go:74	refused:native_account
+user-proof-pid	logging/go/service/service.go:203	refused
+user-proof-pid	logging/go/service/service.go:260	refused:identity_required
+user-proof-pid	model/go/service/service.go:173	refused
+user-proof-pid	model/go/service/service.go:224	refused
+user-proof-pid	provider-modelbridge/go/service/host.go:162	refused:identity_required
+user-proof-pid	resource/go/service/leases_host.go:47	refused
+user-proof-pid	rights/go/client/authorization.go:30	refused
+user-proof-pid	serve/opencode_session_windows.go:278	refused
+user-proof-pid	serve/runtime_logging.go:25	ok posix:1000 
+user-proof-pid	storage-over-local-stores/go/service/host.go:145	refused:identity_required
+user-proof-pid	storage/go/service/service.go:343	refused
+user-proof-signed	asks/go/application/receiver.go:26	ok posix:1000 <program>
+user-proof-signed	config/go/service/service.go:171	ok posix:1000 
+user-proof-signed	conformance/clients/facade/host.go:91	ok posix:1000 
+user-proof-signed	conformance/clients/router/server.go:72	ok posix:1000 
+user-proof-signed	credentials/go/service/host.go:155	ok posix:1000 <program>
+user-proof-signed	examples/rights-playground/main.go:250	ok posix:1000 
+user-proof-signed	facade/go-core/resolution/caller.go:21	ok posix:1000 <program>
+user-proof-signed	facade/go/runtime/host.go:815	ok posix:1000 
+user-proof-signed	facade/go/runtime/jobs.go:129	ok posix:1000 <program> <program>
+user-proof-signed	facade/go/runtime/jobs.go:99	ok posix:1000 <program>
+user-proof-signed	inference/adapters/go/gateway/window.go:494	ok posix:1000 <program>
+user-proof-signed	inference/go/service/host.go:276	ok posix:1000 <program>
+user-proof-signed	job/go/acceptanceprovider/link.go:69	ok posix:1000 
+user-proof-signed	logging/go/service/application_history.go:74	ok posix:1000 <program>
+user-proof-signed	logging/go/service/service.go:203	ok posix:1000 <program>
+user-proof-signed	logging/go/service/service.go:260	ok posix:1000 
+user-proof-signed	model/go/service/service.go:173	ok posix:1000 
+user-proof-signed	model/go/service/service.go:224	ok posix:1000 <program>
+user-proof-signed	provider-modelbridge/go/service/host.go:162	ok posix:1000 <program>
+user-proof-signed	resource/go/service/leases_host.go:47	ok posix:1000 <program>
+user-proof-signed	rights/go/client/authorization.go:30	ok posix:1000 <program>
+user-proof-signed	serve/opencode_session_windows.go:278	refused
+user-proof-signed	serve/runtime_logging.go:25	ok posix:1000 
+user-proof-signed	storage-over-local-stores/go/service/host.go:145	ok posix:1000 
+user-proof-signed	storage/go/service/service.go:343	ok posix:1000 <program>
+user-proof-unmet	asks/go/application/receiver.go:26	refused:proof
+user-proof-unmet	config/go/service/service.go:171	refused:identity_required
+user-proof-unmet	conformance/clients/facade/host.go:91	refused
+user-proof-unmet	conformance/clients/router/server.go:72	refused
+user-proof-unmet	credentials/go/service/host.go:155	refused
+user-proof-unmet	examples/rights-playground/main.go:250	ok posix:1000 
+user-proof-unmet	facade/go-core/resolution/caller.go:21	refused
+user-proof-unmet	facade/go/runtime/host.go:815	refused
+user-proof-unmet	facade/go/runtime/jobs.go:129	refused:proof
+user-proof-unmet	facade/go/runtime/jobs.go:99	refused:proof
+user-proof-unmet	inference/adapters/go/gateway/window.go:494	refused
+user-proof-unmet	inference/go/service/host.go:276	refused
+user-proof-unmet	job/go/acceptanceprovider/link.go:69	refused
+user-proof-unmet	logging/go/service/application_history.go:74	refused:native_account
+user-proof-unmet	logging/go/service/service.go:203	refused
+user-proof-unmet	logging/go/service/service.go:260	refused:identity_required
+user-proof-unmet	model/go/service/service.go:173	refused
+user-proof-unmet	model/go/service/service.go:224	refused
+user-proof-unmet	provider-modelbridge/go/service/host.go:162	refused:identity_required
+user-proof-unmet	resource/go/service/leases_host.go:47	refused
+user-proof-unmet	rights/go/client/authorization.go:30	refused
+user-proof-unmet	serve/opencode_session_windows.go:278	refused
+user-proof-unmet	serve/runtime_logging.go:25	ok posix:1000 
+user-proof-unmet	storage-over-local-stores/go/service/host.go:145	refused:identity_required
+user-proof-unmet	storage/go/service/service.go:343	refused
+user-proof-unsigned	asks/go/application/receiver.go:26	refused:proof
+user-proof-unsigned	config/go/service/service.go:171	refused:identity_required
+user-proof-unsigned	conformance/clients/facade/host.go:91	refused
+user-proof-unsigned	conformance/clients/router/server.go:72	refused
+user-proof-unsigned	credentials/go/service/host.go:155	refused
+user-proof-unsigned	examples/rights-playground/main.go:250	ok posix:1000 
+user-proof-unsigned	facade/go-core/resolution/caller.go:21	refused
+user-proof-unsigned	facade/go/runtime/host.go:815	refused
+user-proof-unsigned	facade/go/runtime/jobs.go:129	refused:proof
+user-proof-unsigned	facade/go/runtime/jobs.go:99	refused:proof
+user-proof-unsigned	inference/adapters/go/gateway/window.go:494	refused
+user-proof-unsigned	inference/go/service/host.go:276	refused
+user-proof-unsigned	job/go/acceptanceprovider/link.go:69	refused
+user-proof-unsigned	logging/go/service/application_history.go:74	refused:native_account
+user-proof-unsigned	logging/go/service/service.go:203	refused
+user-proof-unsigned	logging/go/service/service.go:260	refused:identity_required
+user-proof-unsigned	model/go/service/service.go:173	refused
+user-proof-unsigned	model/go/service/service.go:224	refused
+user-proof-unsigned	provider-modelbridge/go/service/host.go:162	refused:identity_required
+user-proof-unsigned	resource/go/service/leases_host.go:47	refused
+user-proof-unsigned	rights/go/client/authorization.go:30	refused
+user-proof-unsigned	serve/opencode_session_windows.go:278	refused
+user-proof-unsigned	serve/runtime_logging.go:25	ok posix:1000 
+user-proof-unsigned	storage-over-local-stores/go/service/host.go:145	refused:identity_required
+user-proof-unsigned	storage/go/service/service.go:343	refused
+windows-missing-program	asks/go/application/receiver.go:26	refused:program
+windows-missing-program	config/go/service/service.go:171	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	conformance/clients/facade/host.go:91	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	conformance/clients/router/server.go:72	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	credentials/go/service/host.go:155	refused
+windows-missing-program	examples/rights-playground/main.go:250	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	facade/go-core/resolution/caller.go:21	refused
+windows-missing-program	facade/go/runtime/host.go:815	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	facade/go/runtime/jobs.go:129	refused:program
+windows-missing-program	facade/go/runtime/jobs.go:99	refused:program
+windows-missing-program	inference/adapters/go/gateway/window.go:494	refused
+windows-missing-program	inference/go/service/host.go:276	refused
+windows-missing-program	job/go/acceptanceprovider/link.go:69	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	logging/go/service/application_history.go:74	refused:native_program
+windows-missing-program	logging/go/service/service.go:203	refused
+windows-missing-program	logging/go/service/service.go:260	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	model/go/service/service.go:173	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	model/go/service/service.go:224	refused
+windows-missing-program	provider-modelbridge/go/service/host.go:162	refused:identity_required
+windows-missing-program	resource/go/service/leases_host.go:47	refused
+windows-missing-program	rights/go/client/authorization.go:30	refused
+windows-missing-program	serve/opencode_session_windows.go:278	refused
+windows-missing-program	serve/runtime_logging.go:25	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	storage-over-local-stores/go/service/host.go:145	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-missing-program	storage/go/service/service.go:343	refused
+windows-no-sid	asks/go/application/receiver.go:26	refused:account acct=
+windows-no-sid	config/go/service/service.go:171	refused:wrong_user acct=
+windows-no-sid	conformance/clients/facade/host.go:91	refused acct=
+windows-no-sid	conformance/clients/router/server.go:72	refused acct=
+windows-no-sid	credentials/go/service/host.go:155	refused
+windows-no-sid	examples/rights-playground/main.go:250	ok windows: 
+windows-no-sid	facade/go-core/resolution/caller.go:21	ok windows: <program>
+windows-no-sid	facade/go/runtime/host.go:815	refused acct=
+windows-no-sid	facade/go/runtime/jobs.go:129	refused:another_owner acct=
+windows-no-sid	facade/go/runtime/jobs.go:99	refused:another_owner acct=
+windows-no-sid	inference/adapters/go/gateway/window.go:494	refused
+windows-no-sid	inference/go/service/host.go:276	refused
+windows-no-sid	job/go/acceptanceprovider/link.go:69	refused
+windows-no-sid	logging/go/service/application_history.go:74	refused:wrong_user acct=
+windows-no-sid	logging/go/service/service.go:203	ok windows: <program>
+windows-no-sid	logging/go/service/service.go:260	refused:wrong_user acct=
+windows-no-sid	model/go/service/service.go:173	refused acct=
+windows-no-sid	model/go/service/service.go:224	refused
+windows-no-sid	provider-modelbridge/go/service/host.go:162	refused:forbidden acct=
+windows-no-sid	resource/go/service/leases_host.go:47	refused
+windows-no-sid	rights/go/client/authorization.go:30	refused
+windows-no-sid	serve/opencode_session_windows.go:278	refused
+windows-no-sid	serve/runtime_logging.go:25	refused
+windows-no-sid	storage-over-local-stores/go/service/host.go:145	refused:forbidden acct=
+windows-no-sid	storage/go/service/service.go:343	refused acct=
+windows-sid	asks/go/application/receiver.go:26	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	config/go/service/service.go:171	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	conformance/clients/facade/host.go:91	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	conformance/clients/router/server.go:72	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	credentials/go/service/host.go:155	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	examples/rights-playground/main.go:250	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	facade/go-core/resolution/caller.go:21	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	facade/go/runtime/host.go:815	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	facade/go/runtime/jobs.go:129	ok windows:S-1-5-21-1000-2000-3000-1001 <program> <program>
+windows-sid	facade/go/runtime/jobs.go:99	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	inference/adapters/go/gateway/window.go:494	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	inference/go/service/host.go:276	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	job/go/acceptanceprovider/link.go:69	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	logging/go/service/application_history.go:74	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	logging/go/service/service.go:203	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	logging/go/service/service.go:260	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	model/go/service/service.go:173	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	model/go/service/service.go:224	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	provider-modelbridge/go/service/host.go:162	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	resource/go/service/leases_host.go:47	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	rights/go/client/authorization.go:30	ok windows:S-1-5-21-1000-2000-3000-1001 <program>
+windows-sid	serve/opencode_session_windows.go:278	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	serve/runtime_logging.go:25	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	storage-over-local-stores/go/service/host.go:145	ok windows:S-1-5-21-1000-2000-3000-1001 
+windows-sid	storage/go/service/service.go:343	ok windows:S-1-5-21-1000-2000-3000-1001 <program>

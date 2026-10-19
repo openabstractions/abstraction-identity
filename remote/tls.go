@@ -25,11 +25,11 @@ var ErrTrust = errors.New("remote: authentication or trust configuration refused
 // dialer. Registration supplies address, ServerName, trust roots and client key.
 // Keep certificate keys and callbacks immutable while this client is in use.
 // No endpoint discovery, system-root fallback, redirect or retry occurs here.
-func Client(address string, config *tls.Config, timeout time.Duration, maxFrame uint32) (listen.FrameClient, error) {
+func Client(address string, config *tls.Config, timeout time.Duration, maxFrame uint32, admit func(Peer) error) (listen.FrameClient, error) {
 	if _, _, err := net.SplitHostPort(address); err != nil {
 		return listen.FrameClient{}, fmt.Errorf("%w: explicit host:port required", ErrTrust)
 	}
-	if config == nil || config.InsecureSkipVerify || config.ServerName == "" || config.RootCAs == nil ||
+	if admit == nil || config == nil || config.InsecureSkipVerify || config.ServerName == "" || config.RootCAs == nil ||
 		(len(config.Certificates) == 0 && config.GetClientCertificate == nil) {
 		return listen.FrameClient{}, fmt.Errorf("%w: server name, roots and client credential required", ErrTrust)
 	}
@@ -37,6 +37,7 @@ func Client(address string, config *tls.Config, timeout time.Duration, maxFrame 
 	c.RootCAs = config.RootCAs.Clone()
 	c.MinVersion = tls.VersionTLS13
 	c.NextProtos = []string{Protocol}
+	verifyAdmission(c, admit)
 	// A fresh handshake rechecks the configured certificate trust on every call.
 	c.ClientSessionCache = nil
 	if c.MaxVersion != 0 && c.MaxVersion < c.MinVersion {
@@ -69,6 +70,28 @@ func Client(address string, config *tls.Config, timeout time.Duration, maxFrame 
 		return &ownedStream{Conn: conn, raw: raw}, nil
 	}
 	return listen.FrameClient{Endpoint: address, Timeout: timeout, MaxFrame: maxFrame, Dialer: dial}, nil
+}
+
+// verifyAdmission retains ordinary TLS verification and any caller verifier.
+// The fixed callback reads the owner's current pin policy on every handshake.
+// It must be bounded and must not mutate TLS configuration or prompt the user.
+func verifyAdmission(config *tls.Config, admit func(Peer) error) {
+	previous := config.VerifyConnection
+	config.VerifyConnection = func(state tls.ConnectionState) error {
+		if previous != nil {
+			if err := previous(state); err != nil {
+				return err
+			}
+		}
+		verified, err := peer(state)
+		if err != nil {
+			return err
+		}
+		if err := admit(verified); err != nil {
+			return fmt.Errorf("%w: peer key refused: %w", ErrTrust, err)
+		}
+		return nil
+	}
 }
 
 // TLS Close can start a fresh close-notify write timeout. Frame ownership ends

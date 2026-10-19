@@ -45,6 +45,10 @@ type Peer struct {
 	// process running as the same user. See CONTRACT.md before writing a
 	// rule against this field.
 	Package Attr[string]
+	// Sandbox is the Linux sandbox the peer runs in (Flatpak, Snap or
+	// Firejail), at the proof and with the reason Package's Linux answer
+	// carries. Unset on Windows and macOS and for an unsandboxed peer.
+	Sandbox Attr[Sandbox]
 	// Code is a code signing identity for the image, and never exceeds
 	// ProofBound on any platform this package supports.
 	//
@@ -249,6 +253,24 @@ type Code struct {
 	// against the system's own anchor instead, which is a different claim
 	// and should be checked with a requirement rather than a string compare.
 	TeamID string
+
+	// SharedInterpreter and RunsForeignCode are the program's two
+	// script-host facts (ID-I1, TD83), each bound to its own purpose, and
+	// ForeignCode names the evidence of RunsForeignCode. ClassifyProgram
+	// sets them; every other source of a Code leaves them zero.
+	//
+	// SharedInterpreter: the program is an interpreter many programs share,
+	// so a rule for it would cover every script it runs. It is refused as an
+	// application and receives no default.
+	//
+	// RunsForeignCode: code its publisher did not ship can run as this
+	// program. A shared interpreter does; so does an application's own image
+	// that hosts scripts, which keeps its program rules and its
+	// application's defaults and never receives a publisher permit, a
+	// licence or the power to answer for other applications.
+	SharedInterpreter bool
+	RunsForeignCode   bool
+	ForeignCode       string
 }
 
 func (c Code) String() string {

@@ -47,7 +47,7 @@ func TestCheckElevatedHelper(t *testing.T) {
 		"posix user": func(p *Peer) {
 			p.User = attr("user", User{Kind: "posix", UID: 0, GID: 0}, ProofKernel, "")
 		},
-		"process unknown": func(p *Peer) { p.Process = unknown[Process]("process", "gone") },
+		"process unknown":  func(p *Peer) { p.Process = unknown[Process]("process", "gone") },
 		"path below bound": func(p *Peer) { p.Path = attr("path", program, ProofPID, "") },
 		"another image": func(p *Peer) {
 			p.Path = attr("path", filepath.Join(dir, "openabstractions.exe"), ProofBound, "")

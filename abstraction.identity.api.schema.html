@@ -2,11 +2,11 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Open Abstractions — schema</title>
+<title>OpenAbstractions — schema</title>
 <link rel="stylesheet" href="style.css">
 
 <main>
-<nav class="site" aria-label="Primary navigation"><a class="name" href="index.html">Open Abstractions</a>
+<nav class="site" aria-label="Primary navigation"><a class="name" href="index.html">OpenAbstractions</a>
 <a href="adopt.html">Adopt</a><a href="cases.html">Cases</a><span class="nav-devs-label">for developers</span><a href="reference.html">Reference</a><a href="coverage.html">Coverage</a><a href="catalogue.html">Catalogue</a><a href="https://github.com/openabstractions">GitHub</a></nav>
 
 
@@ -80,6 +80,20 @@
 <tbody>
 <tr><td><code>native_operations</code></td><td><code>list&lt;string&gt;</code></td><td><code>OfHandle, OfConn, Bind, BindConn, BindXPCRequest, Ceiling, CeilingFor, CanEver, Check, Get, AtLeast, Binding.Peer, Binding.Check, Binding.Alive, Binding.Captured, Binding.BoundAt, Binding.EvidenceValidUntil, Binding.Shared, Binding.Close</code></td></tr>
 <tr><td><code>native_binding_types</code></td><td><code>list&lt;string&gt;</code></td><td><code>Handle, Peer, Attr&lt;T&gt;, User, Process, Code, Options, Binding, Need, Limits, Transport, XPCRequest</code></td></tr>
+<tr><td><code>ipc_ok</code></td><td><code>i32</code></td><td><code>0</code></td></tr>
+<tr><td><code>ipc_timeout</code></td><td><code>i32</code></td><td><code>1</code></td></tr>
+<tr><td><code>ipc_disconnected</code></td><td><code>i32</code></td><td><code>2</code></td></tr>
+<tr><td><code>ipc_io_error</code></td><td><code>i32</code></td><td><code>3</code></td></tr>
+<tr><td><code>ipc_invalid_argument</code></td><td><code>i32</code></td><td><code>4</code></td></tr>
+<tr><td><code>ipc_no_memory</code></td><td><code>i32</code></td><td><code>5</code></td></tr>
+<tr><td><code>ipc_internal_error</code></td><td><code>i32</code></td><td><code>6</code></td></tr>
+<tr><td><code>ipc_cancelled</code></td><td><code>i32</code></td><td><code>7</code></td></tr>
+<tr><td><code>ipc_untrusted</code></td><td><code>i32</code></td><td><code>8</code></td></tr>
+<tr><td><code>ipc_proof_unavailable</code></td><td><code>i32</code></td><td><code>9</code></td></tr>
+<tr><td><code>ipc_default_max_frame</code></td><td><code>i32</code></td><td><code>1048576</code></td></tr>
+<tr><td><code>ipc_client_max_frame</code></td><td><code>i32</code></td><td><code>2097152</code></td></tr>
+<tr><td><code>ipc_wire_max_frame</code></td><td><code>i32</code></td><td><code>1073741823</code></td></tr>
+<tr><td><code>ipc_default_call_budget_ms</code></td><td><code>i32</code></td><td><code>5000</code></td></tr>
 </tbody></table></div>
 <h2 id="refusals">Refusal words <span class="tag">[DEF-R1]</span></h2>
 <div class="wrap"><table>

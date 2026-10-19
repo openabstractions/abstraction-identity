@@ -27,9 +27,17 @@ import (
 // unsigned and names nothing, although it carries the same resource (VISION
 // 2026-10-01, ID-W4).
 func TestVerifyFileNamesTheProgramByItsVersionResource(t *testing.T) {
+	data, err := os.ReadFile(systemPowerShell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := readVersionResource(bytes.NewReader(data))
+	if err != nil || version.description == "" {
+		t.Fatalf("PowerShell fixture has no version description: %+v %v", version, err)
+	}
 	code, proof, err := VerifyFile(systemPowerShell, nil)
 	if err != nil || proof != ProofBound || !code.Catalog ||
-		code.Description != "Windows PowerShell" || code.OriginalName != "PowerShell.EXE" {
+		code.Description != version.description || code.OriginalName != "PowerShell.EXE" {
 		t.Fatalf("VerifyFile(%q) = %s %v %v", systemPowerShell, named(code), proof, err)
 	}
 
@@ -39,16 +47,9 @@ func TestVerifyFileNamesTheProgramByItsVersionResource(t *testing.T) {
 		t.Fatalf("VerifyFile(%q) = %s %v %v", git, named(code), proof, err)
 	}
 
-	data, err := os.ReadFile(systemPowerShell)
-	if err != nil {
-		t.Fatal(err)
-	}
 	renamed := filepath.Join(t.TempDir(), "OllamaHelper.exe")
 	if err := os.WriteFile(renamed, data, 0o600); err != nil {
 		t.Fatal(err)
-	}
-	if v, err := readVersionResource(bytes.NewReader(data)); err != nil || v.description != "Windows PowerShell" {
-		t.Fatalf("the copy must carry the resource for this test to mean anything: %+v %v", v, err)
 	}
 	exe := mustExe(t)
 	for _, path := range []string{renamed, exe} {
@@ -100,10 +101,10 @@ func duringVerification(t *testing.T, during func()) {
 	t.Helper()
 	previous := winTrustCall
 	t.Cleanup(func() { winTrustCall = previous })
-	winTrustCall = func(choice uint32, subject unsafe.Pointer, revocation bool) error {
-		verdict := previous(choice, subject, revocation)
+	winTrustCall = func(choice uint32, subject unsafe.Pointer, revocation bool) (trustSigner, error) {
+		signer, verdict := previous(choice, subject, revocation)
 		during()
-		return verdict
+		return signer, verdict
 	}
 }
 

@@ -1,6 +1,7 @@
 package privatedir
 
 import (
+	"encoding/binary"
 	"errors"
 	"os"
 	"os/exec"
@@ -45,6 +46,87 @@ func allowsOnly(t *testing.T, p string) error {
 		}
 	}
 	return nil
+}
+
+func TestHeldHardlinkQueryNativeLength(t *testing.T) {
+	root := pidDir(t)
+	first := filepath.Join(root, "a")
+	if err := os.WriteFile(first, []byte("owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(first, filepath.Join(root, "b")); err != nil {
+		t.Fatal(err)
+	}
+	e, _, err := openEntry(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.close()
+	buf := hardlinkBuffer(4096)
+	var ios windows.IO_STATUS_BLOCK
+	if err := windows.NtQueryInformationFile(e.h, &ios, &buf[0], uint32(len(buf)), 46); err != nil {
+		t.Fatal(err)
+	}
+	if count := binary.LittleEndian.Uint32(buf[4:8]); count != 2 {
+		t.Fatalf("native hard-link count %d", count)
+	}
+	if length := binary.LittleEndian.Uint32(buf[24:28]); length != 1 {
+		t.Fatalf("one UTF-16 code unit has native FileNameLength %d, expected one character", length)
+	}
+}
+
+func TestProtectModelFolderRefusesIncompleteLinkMetadataBeforeChanges(t *testing.T) {
+	for _, fault := range []string{"unsupported", "zero-parent", "incomplete-count", "nul-name", "invalid-utf16", "name-length-overflow", "invalid-byte-count", "overlapping-entry", "changed-name"} {
+		t.Run(fault, func(t *testing.T) {
+			root := pidDir(t)
+			dir, moved := modelSet(t, root)
+			if err := os.Link(moved, filepath.Join(dir, "alias.bin")); err != nil {
+				t.Fatal(err)
+			}
+			beforeDir, beforeFile := descriptor(t, dir), descriptor(t, moved)
+			query := modelLinkQuery
+			t.Cleanup(func() { modelLinkQuery = query })
+			calls := 0
+			modelLinkQuery = func(h windows.Handle, ios *windows.IO_STATUS_BLOCK, out *byte, size uint32, class uint32) error {
+				calls++
+				if fault == "unsupported" {
+					return windows.ERROR_NOT_SUPPORTED
+				}
+				if err := query(h, ios, out, size, class); err != nil {
+					return err
+				}
+				buf := unsafe.Slice(out, int(size))
+				switch fault {
+				case "zero-parent":
+					binary.LittleEndian.PutUint64(buf[16:24], 0)
+				case "incomplete-count":
+					binary.LittleEndian.PutUint32(buf[4:8], 0)
+				case "nul-name":
+					binary.LittleEndian.PutUint16(buf[28:30], 0)
+				case "invalid-utf16":
+					binary.LittleEndian.PutUint16(buf[28:30], 0xd800)
+				case "name-length-overflow":
+					binary.LittleEndian.PutUint32(buf[24:28], ^uint32(0))
+				case "invalid-byte-count":
+					ios.Information = uintptr(size) + 1
+				case "overlapping-entry":
+					binary.LittleEndian.PutUint32(buf[8:12], 8)
+				case "changed-name":
+					binary.LittleEndian.PutUint16(buf[28:30], '!')
+				}
+				return nil
+			}
+			if err := ProtectModelFolder(dir, []string{root}); !errors.Is(err, ErrNotModelFolder) {
+				t.Fatalf("unprovable metadata: %v", err)
+			}
+			if calls == 0 {
+				t.Fatal("metadata control did not execute")
+			}
+			if descriptor(t, dir) != beforeDir || descriptor(t, moved) != beforeFile {
+				t.Fatal("metadata refusal changed an owned fixture descriptor")
+			}
+		})
+	}
 }
 
 // everyone gives p an explicit entry letting Everyone modify it.
@@ -157,6 +239,33 @@ func TestProtectModelFolder(t *testing.T) {
 	}
 	if err := ProtectModelFolder(dir, []string{pidDir(t)}); !errors.Is(err, ErrNotModelFolder) {
 		t.Fatalf("a folder outside every root: %v", err)
+	}
+}
+
+func TestProtectModelFolderKeepsNativeEnumeratedNames(t *testing.T) {
+	for _, name := range []string{"x.", "x ", "CON"} {
+		t.Run(name, func(t *testing.T) {
+			root := pidDir(t)
+			dir := filepath.Join(root, "set")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(dir, name)
+			if err := os.WriteFile(extendedPath(p), []byte("owned native-name fixture"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// The unchanged legacy ACL entry opener accepts this real name.
+			e, _, err := openEntry(p)
+			if err != nil {
+				t.Fatalf("existing entry opener for %q: %v", name, err)
+			}
+			if err := e.close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := ProtectModelFolder(dir, []string{root}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

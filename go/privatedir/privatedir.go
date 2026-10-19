@@ -9,15 +9,21 @@
 // protected DACL that allows only this account and SYSTEM; Make sets it at
 // CreateDirectory, so the folder never holds its parent's inherited
 // entries. Elsewhere it is a directory of this account with mode 0700. A
-// link, a junction or a file is never a private folder.
+// link, a junction or a file is never a private folder. Storage's layout
+// package makes, keeps and tightens its owner-only roots with Make, CheckDir
+// and Tighten (storage CONTRACT.md STO-L9), so a folder either package makes
+// passes the other's check.
 package privatedir
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/openabstractions/abstraction-identity/fileid"
 )
 
 // ErrNotPrivate reports a folder CheckDir or Ensure refuses: a file, a link,
@@ -52,6 +58,30 @@ func Ensure(dir string) error {
 func CheckDir(dir string) error {
 	if err := check(dir); err != nil {
 		return fmt.Errorf("%w: %s: %v", ErrNotPrivate, dir, err)
+	}
+	return nil
+}
+
+// CheckFile checks an ordinary, single-name file owned by this account. It
+// refuses links in the path. On Windows the actual open file's DACL may allow
+// only this account and SYSTEM; safe inherited entries are accepted. On Unix
+// group/other access is refused. This check changes no permissions. Callers
+// retaining authority also retain/revalidate the file's identity across edits.
+func CheckFile(path string) error {
+	h, err := fileid.Open(context.Background(), fileid.Self, path, fileid.Options{Links: fileid.RefuseLinks, Read: privateFileRead})
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	info, err := h.File().Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || h.FileID().IsDir() || h.FileID().Links() != 1 {
+		return fmt.Errorf("privatedir: %s is not an ordinary single-name file", path)
+	}
+	if err := checkFileHandle(h.File(), info); err != nil {
+		return fmt.Errorf("privatedir: file is not private to this account: %s: %w", path, err)
 	}
 	return nil
 }

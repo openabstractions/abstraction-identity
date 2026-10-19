@@ -152,7 +152,7 @@ func TestBindingRetainsCachedVerdictDeadline(t *testing.T) {
 		codeVerdicts.Unlock()
 		t.Fatal("preloaded verdict was not retained")
 	}
-	entry.at = time.Now().Add(-codeVerdictLifetime + 30*time.Second)
+	entry.at = time.Now().Add(-codeVerdictLifetime + time.Minute)
 	wantDeadline := entry.at.Add(codeVerdictLifetime)
 	codeVerdicts.Unlock()
 	b, err := Bind(Handle(server), &Options{ConnectedAt: at})
@@ -168,6 +168,63 @@ func TestBindingRetainsCachedVerdictDeadline(t *testing.T) {
 	}
 	if !b.BoundAt().Before(wantDeadline) || wantDeadline.After(b.BoundAt().Add(time.Minute)) {
 		t.Fatalf("test did not create an aged yet valid verdict: bound %s, expires %s", b.BoundAt(), wantDeadline)
+	}
+}
+
+func TestCodeVerdictRefreshAheadKeepsOriginalBindingDeadline(t *testing.T) {
+	count := countVerifications(t, func(windows.Handle, string, *Options) (Code, Proof, error) {
+		return Code{Status: "stub", Trusted: true}, ProofBound, nil
+	})
+	previous := codeVerdictNow
+	now := time.Now()
+	codeVerdictNow = func() time.Time { return now }
+	t.Cleanup(func() { codeVerdictNow = previous })
+	name := pipeName(t)
+	server := listen(t, name)
+	startChildClient(t, name, "refresh")
+	connected := accept(t, server)
+	readFrom(t, server)
+	old, err := Bind(Handle(server), &Options{ConnectedAt: connected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	original := old.EvidenceValidUntil().Add(-codeVerdictLifetime)
+	// An existing capture keeps this exact deadline even after another capture
+	// verifies the same live occurrence again.
+	now = original.Add(codeVerdictLifetime - codeVerdictRefreshAhead - time.Nanosecond)
+	reused, err := Bind(Handle(server), &Options{ConnectedAt: connected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reused.Close()
+	if !reused.EvidenceValidUntil().Equal(old.EvidenceValidUntil()) || count.Load() != 1 {
+		t.Fatal(reused.EvidenceValidUntil(), count.Load())
+	}
+	now = now.Add(time.Nanosecond)
+	refreshed, err := Bind(Handle(server), &Options{ConnectedAt: connected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer refreshed.Close()
+	if !refreshed.EvidenceValidUntil().Equal(now.Add(codeVerdictLifetime)) || count.Load() != 2 {
+		t.Fatal(refreshed.EvidenceValidUntil(), count.Load())
+	}
+	if !now.Before(old.EvidenceValidUntil()) || !old.EvidenceValidUntil().Equal(original.Add(codeVerdictLifetime)) {
+		t.Fatal("refresh did not overlap immutable old evidence", now, old.EvidenceValidUntil())
+	}
+	// Refresh failure cannot return the old still-unexpired verdict.
+	now = now.Add(codeVerdictLifetime - codeVerdictRefreshAhead)
+	verifyFile = func(windows.Handle, string, *Options) (Code, Proof, error) {
+		return Code{}, ProofNone, errors.New("refresh refused")
+	}
+	failed, err := Bind(Handle(server), &Options{ConnectedAt: connected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer failed.Close()
+	if failed.Captured().Code.Known() || !failed.EvidenceValidUntil().IsZero() {
+		t.Fatal("failed refresh reused stale evidence")
 	}
 }
 

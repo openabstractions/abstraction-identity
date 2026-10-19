@@ -139,7 +139,7 @@ func bindLoopback(client, server netip.AddrPort, opts *Options) (binder, *Peer, 
 	if owner.pid == 0 {
 		return nil, nil, fmt.Errorf("%w: the TCP owner table names no process for %s", ErrNoBinding, client)
 	}
-	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, owner.pid)
+	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, owner.pid)
 	if err != nil {
 		if owner.established {
 			return nil, nil, fmt.Errorf("%w: pid %d created the client socket and can no longer be opened (%v), while the connection is still established; another process holds it", ErrPeerMoved, owner.pid, err)
@@ -197,7 +197,7 @@ func processUser(proc windows.Handle) (User, string, error) {
 		return User{}, "", err
 	}
 	label := readTokenLabel(tok)
-	user := User{Kind: "windows", SID: sid.String(), Elevated: tok.IsElevated(), Integrity: label.integrity, IntegrityRID: label.rid,
+	user := User{Kind: "windows", SID: sid.String(), Elevated: readTokenElevated(tok, label), Integrity: label.integrity, IntegrityRID: label.rid,
 		Restricted: label.restricted, UID: -1, GID: -1}
 	why := label.why
 	if name, domain, err := accountName(sid); err == nil {
@@ -228,11 +228,7 @@ func (b *loopbackWindowsBinding) recheck() error {
 }
 
 func (b *loopbackWindowsBinding) alive() (bool, error) {
-	var code uint32
-	if err := windows.GetExitCodeProcess(b.proc, &code); err != nil {
-		return false, err
-	}
-	return code == stillActive, nil
+	return windowsProcessAlive(b.proc)
 }
 
 func (b *loopbackWindowsBinding) release() error {

@@ -6,7 +6,6 @@ package identity
 // already wrap. Everything else comes from there.
 
 import (
-	"path/filepath"
 	"syscall"
 	"unsafe"
 
@@ -16,14 +15,14 @@ import (
 var (
 	modadvapi32 = windows.NewLazySystemDLL("advapi32.dll")
 	modkernel32 = windows.NewLazySystemDLL("kernel32.dll")
-	modcrypt32  = windows.NewLazySystemDLL("crypt32.dll")
 	modwintrust = windows.NewLazySystemDLL("wintrust.dll")
 
 	procImpersonateNamedPipeClient     = modadvapi32.NewProc("ImpersonateNamedPipeClient")
 	procGetNamedPipeClientComputerName = modkernel32.NewProc("GetNamedPipeClientComputerNameW")
 	procGetPackageFullName             = modkernel32.NewProc("GetPackageFullName")
-	procCryptMsgGetParam               = modcrypt32.NewProc("CryptMsgGetParam")
-	procCryptMsgClose                  = modcrypt32.NewProc("CryptMsgClose")
+	procWTHelperProvDataFromStateData  = modwintrust.NewProc("WTHelperProvDataFromStateData")
+	procWTHelperGetProvSignerFromChain = modwintrust.NewProc("WTHelperGetProvSignerFromChain")
+	procWTHelperGetProvCertFromChain   = modwintrust.NewProc("WTHelperGetProvCertFromChain")
 
 	procCryptCATAdminAcquireContext2         = modwintrust.NewProc("CryptCATAdminAcquireContext2")
 	procCryptCATAdminReleaseContext          = modwintrust.NewProc("CryptCATAdminReleaseContext")
@@ -126,10 +125,6 @@ const (
 	// It is the answer for every ordinary executable, so it is not an error.
 	appmodelErrorNoPackage syscall.Errno = 15700
 
-	// CMSG_SIGNER_CERT_INFO_PARAM: the CERT_INFO of the signer, used to find
-	// the signing certificate in the store the message came with.
-	cmsgSignerCertInfoParam = 7
-
 	// Authenticode verdicts worth naming rather than printing as hex.
 	trustENoSignature        = 0x800B0100
 	trustESubjectFormUnknown = 0x800B0003
@@ -200,55 +195,11 @@ func packageFullName(proc windows.Handle) (string, error) {
 	return windows.UTF16ToString(buf), nil
 }
 
-func cryptMsgGetParam(msg windows.Handle, param, index uint32, data unsafe.Pointer, size *uint32) error {
-	r1, _, e1 := syscall.SyscallN(procCryptMsgGetParam.Addr(), uintptr(msg), uintptr(param),
-		uintptr(index), uintptr(data), uintptr(unsafe.Pointer(size)))
-	if r1 == 0 {
-		return errnoOrEINVAL(e1)
-	}
-	return nil
-}
-
-func cryptMsgClose(msg windows.Handle) {
-	syscall.SyscallN(procCryptMsgClose.Addr(), uintptr(msg))
-}
-
 func errnoOrEINVAL(e syscall.Errno) error {
 	if e != 0 {
 		return e
 	}
 	return syscall.EINVAL
-}
-
-func init() {
-	// A short DOS 8.3 name component and its long-form spelling name the
-	// same file. This concept exists only on Windows; this is the one
-	// platform where canonicalProgramPath does more than return its argument.
-	canonicalProgramPath = func(path string) string {
-		if !HasShortNameComponent(path) || localPath(path) != nil {
-			// A path with no component shaped like a short alias has none
-			// to expand, and a program on a share or a device name is never
-			// read here.
-			return path
-		}
-		observeOpen(path)
-		if long, err := longImagePath(path); err == nil {
-			return long
-		}
-		// A file that does not exist yet keeps its own spelling, below the
-		// deepest folder that exists, which reads in its long form: a short
-		// alias in an existing part of the path never survives into a stored
-		// spelling (UnresolvedShortName covers the part that does not exist).
-		dir, rest := filepath.Dir(path), filepath.Base(path)
-		for dir != filepath.Dir(dir) {
-			if long, err := longImagePath(dir); err == nil {
-				return filepath.Join(long, rest)
-			}
-			rest = filepath.Join(filepath.Base(dir), rest)
-			dir = filepath.Dir(dir)
-		}
-		return path
-	}
 }
 
 var procGetPackagePathByFullName = modkernel32.NewProc("GetPackagePathByFullName")

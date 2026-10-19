@@ -46,3 +46,12 @@ inline std::string process_user_sid() {
 }
 }
 #endif
+
+#ifndef _WIN32
+#include <unistd.h>
+namespace abstraction::ipc {
+// Selection separately decides whether mixed real/effective identity is
+// admissible; this primitive only reads the process's effective account.
+inline uid_t process_effective_uid() noexcept { return ::geteuid(); }
+}
+#endif

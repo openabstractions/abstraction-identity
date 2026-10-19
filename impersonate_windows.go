@@ -136,8 +136,8 @@ func peerUser(pipe windows.Handle) (User, string, error) {
 		if err != nil {
 			return fmt.Errorf("identity: copy SID: %w", err)
 		}
-		elevated = tok.IsElevated()
 		label = readTokenLabel(tok)
+		elevated = readTokenElevated(tok, label)
 		return nil
 	})
 	if err != nil {

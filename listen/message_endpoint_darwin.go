@@ -53,7 +53,9 @@ func (c *xpcConn) receiveMessage(ctx context.Context, limit uint32) (receivedMes
 	if err != nil {
 		return receivedMessage{}, err
 	}
-	return receivedMessage{frame: frame, binding: binding, done: c.request.Done(), reply: func(replyCtx context.Context, reply []byte) error {
+	return receivedMessage{frame: frame, binding: binding, done: c.request.Done(), matchStarted: func(started *identity.Binding, evidence *identity.SealedResourceEvidence) (identity.Code, identity.Proof, error) {
+		return evidence.MatchStartedXPCRequest(started, c.request)
+	}, reply: func(replyCtx context.Context, reply []byte) error {
 		if err := replyCtx.Err(); err != nil {
 			return err
 		}

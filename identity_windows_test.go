@@ -3,16 +3,153 @@
 package identity
 
 import (
+	"bytes"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestSignedPipePeerReportsNativeSigner(t *testing.T) {
+	peer, want, moved := signedPipePeer(t, false)
+	code, err := peer.Code.AtLeast(ProofBound)
+	if err != nil || !code.Trusted || code.Catalog || code.Subject != want.Subject || code.Issuer != want.Issuer ||
+		code.Description != want.Description || code.OriginalName != want.OriginalName || moved {
+		t.Fatalf("signed pipe peer: code=%+v want=%+v error=%v moved=%v", code, want, err, moved)
+	}
+	if _, err := peer.Code.AtLeast(ProofSigned); err == nil {
+		t.Fatal("Windows peer code exceeded its bound proof ceiling")
+	}
+	t.Logf("kernel-bound pipe client: resource=%q publisher=%q issuer=%q", code.OriginalName, code.Subject, code.Issuer)
+}
+
+func TestSignedPipePeerRefusesImageReplacement(t *testing.T) {
+	peer, _, moved := signedPipePeer(t, true)
+	if !moved || peer.Code.Known() {
+		t.Fatalf("peer image replacement supplied code evidence: moved=%v code=%v", moved, peer.Code)
+	}
+	if _, err := peer.Code.AtLeast(ProofBound); err == nil {
+		t.Fatal("peer image replacement satisfied bound code policy")
+	}
+	t.Logf("kernel process retained; changed image-path signature refused: %v", peer.Code)
+}
+
+// signedPipePeer exercises the actual Bind receiver with a copied signed Node
+// client. The literal script uses only built-in local named-pipe transport.
+// Child environment, PID lifetime, pipe and copies are owned by this fixture.
+func signedPipePeer(t *testing.T, replace bool) (*Peer, Code, bool) {
+	t.Helper()
+	dir := t.TempDir()
+	clearVerdicts()
+	t.Cleanup(clearVerdicts)
+	source := `C:\Program Files\nodejs\node.exe`
+	want, proof, err := VerifyFile(source, nil)
+	if err != nil || proof != ProofBound || !want.Trusted || want.Catalog || want.Subject != "OpenJS Foundation" || want.Issuer == "" || want.OriginalName != "node.exe" {
+		t.Fatalf("signed Node source fixture: %+v %v %v", want, proof, err)
+	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := filepath.Join(dir, "peer-node.exe")
+	if err := os.WriteFile(program, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := pipeName(t)
+	server := listen(t, name)
+	const script = `const net=require('node:net');const s=net.connect(process.argv[1],()=>s.write('held-peer'));const timer=setTimeout(()=>process.exit(2),15000);s.once('data',()=>{clearTimeout(timer);s.end()});s.on('error',()=>process.exit(3));`
+	child := exec.Command(program, "-e", script, name)
+	system := os.Getenv("SystemRoot")
+	child.Env = []string{"SystemRoot=" + system, "WINDIR=" + system, "PATH=" + filepath.Join(system, "System32"), "TEMP=" + dir, "TMP=" + dir}
+	child.Dir = dir
+	var output bytes.Buffer
+	child.Stdout, child.Stderr = &output, &output
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- child.Wait() }()
+	t.Cleanup(func() {
+		var n uint32
+		windows.WriteFile(server, []byte{1}, &n, nil)
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("owned Node exit: %v (%s)", err, output.String())
+			}
+		case <-time.After(3 * time.Second):
+			// Only the PID this fixture started is eligible for termination.
+			child.Process.Kill()
+			select {
+			case <-done:
+				t.Error("owned Node needed PID cleanup after acknowledgement")
+			case <-time.After(3 * time.Second):
+				t.Error("owned Node was not reaped")
+			}
+		}
+		t.Logf("owned signed child PID=%d reaped=%v", child.Process.Pid, child.ProcessState != nil)
+	})
+	at := accept(t, server)
+	if got := string(readFrom(t, server)); got != "held-peer" {
+		t.Fatalf("bounded client payload=%q", got)
+	}
+	moved := false
+	if replace {
+		git := signedGit(t)
+		other, proof, err := VerifyFile(git, nil)
+		if err != nil || proof != ProofBound || !other.Trusted || other.Subject == "" || other.Subject == want.Subject {
+			t.Fatalf("distinct signed replacement fixture: %+v %v %v", other, proof, err)
+		}
+		replacement, err := os.ReadFile(git)
+		if err != nil {
+			t.Fatal(err)
+		}
+		previous := winTrustCall
+		t.Cleanup(func() { winTrustCall = previous })
+		winTrustCall = func(choice uint32, subject unsafe.Pointer, revocation bool) (trustSigner, error) {
+			if choice == windows.WTD_CHOICE_FILE && !moved {
+				if err := os.Rename(program, filepath.Join(dir, "held-node.exe")); err != nil {
+					t.Fatalf("running-image rename unsupported by this owned fixture: %v", err)
+				}
+				if err := os.WriteFile(program, replacement, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				moved = true
+			}
+			return previous(choice, subject, revocation)
+		}
+	}
+	binding, err := Bind(Handle(server), &Options{ConnectedAt: at})
+	if err != nil {
+		t.Fatalf("Bind real signed pipe client: %v", err)
+	}
+	defer binding.Close()
+	peer, err := binding.Peer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc, err := peer.Process.AtLeast(ProofKernel)
+	if err != nil || proc.PID != child.Process.Pid || proc.Recycled || proc.StartTime.IsZero() || proc.StartTime.After(at) {
+		t.Fatalf("kernel process: %+v %v; child PID=%d accepted=%v", proc, err, child.Process.Pid, at)
+	}
+	user, err := peer.User.AtLeast(ProofKernel)
+	if err != nil || user.SID != currentUserSID(t) {
+		t.Fatalf("kernel account: %+v %v", user, err)
+	}
+	if _, err := peer.Path.AtLeast(ProofBound); err != nil {
+		t.Fatalf("peer path: %v", err)
+	}
+	t.Logf("real pipe Bind PID=%d start=%v user=%q moved=%v", proc.PID, proc.StartTime, user.SID, moved)
+	return peer, want, moved
+}
 
 // TestPeerIsTheProcessThatConnected is the test the package exists to pass: a
 // real server and a real client, in separate processes, over a real named
@@ -450,7 +587,6 @@ func TestCodeSignatureOfASignedBinary(t *testing.T) {
 	// Either way the publisher is named: the embedded signer, or the
 	// signer of the catalog verifyTrust accepted the file through.
 	_, _, embedErr := signerName(p, windows.CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED)
-	c = withSigner(c, p)
 	t.Logf("%s: embedded=%v catalog=%v subject=%q issuer=%q", signed, embedErr == nil, c.Catalog, c.Subject, c.Issuer)
 	if !c.Trusted || c.Catalog != (embedErr != nil) || c.Subject != "Microsoft Windows" || c.Issuer == "" {
 		t.Errorf("the signer of %s is not named: %+v", signed, c)

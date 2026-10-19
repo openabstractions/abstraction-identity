@@ -3,6 +3,20 @@
 """abstraction.identity.api: generated contract types, vocabularies and service clients."""
 
 from ._codec import (
+    IPC_CANCELLED,
+    IPC_CLIENT_MAX_FRAME,
+    IPC_DEFAULT_CALL_BUDGET_MS,
+    IPC_DEFAULT_MAX_FRAME,
+    IPC_DISCONNECTED,
+    IPC_INTERNAL_ERROR,
+    IPC_INVALID_ARGUMENT,
+    IPC_IO_ERROR,
+    IPC_NO_MEMORY,
+    IPC_OK,
+    IPC_PROOF_UNAVAILABLE,
+    IPC_TIMEOUT,
+    IPC_UNTRUSTED,
+    IPC_WIRE_MAX_FRAME,
     NATIVE_BINDING_TYPES,
     NATIVE_OPERATIONS,
     Proof,
@@ -11,9 +25,25 @@ from ._codec import (
     Refusal,
     decode,
     encode,
+    from_json,
+    to_json,
 )
 
 __all__ = [
+    "IPC_CANCELLED",
+    "IPC_CLIENT_MAX_FRAME",
+    "IPC_DEFAULT_CALL_BUDGET_MS",
+    "IPC_DEFAULT_MAX_FRAME",
+    "IPC_DISCONNECTED",
+    "IPC_INTERNAL_ERROR",
+    "IPC_INVALID_ARGUMENT",
+    "IPC_IO_ERROR",
+    "IPC_NO_MEMORY",
+    "IPC_OK",
+    "IPC_PROOF_UNAVAILABLE",
+    "IPC_TIMEOUT",
+    "IPC_UNTRUSTED",
+    "IPC_WIRE_MAX_FRAME",
     "NATIVE_BINDING_TYPES",
     "NATIVE_OPERATIONS",
     "Proof",
@@ -22,6 +52,8 @@ __all__ = [
     "Refusal",
     "decode",
     "encode",
+    "from_json",
+    "to_json",
 ]
 
 # Report every class and function as a member of this package, so help(),

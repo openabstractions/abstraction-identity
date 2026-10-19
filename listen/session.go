@@ -628,6 +628,7 @@ type sessionCall struct {
 	continued bool
 	closed    bool
 	broken    bool
+	aborted   bool
 	reading   int
 	readDone  *sync.Cond
 	done      chan struct{}
@@ -662,10 +663,24 @@ func (c *sessionCall) Bind() (*identity.Binding, error) {
 	return c.s.binding.Shared(), nil
 }
 
+// abort interrupts a cancelled exchange's I/O and breaks the session. The
+// session and its slot remain until Close, which the handler's return makes.
+func (c *sessionCall) abort() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.aborted {
+		return
+	}
+	c.aborted = true
+	c.broken = true
+	//unchecked: best-effort interrupt of blocked I/O; a failure means the connection is already broken
+	c.s.pc.SetDeadline(time.Now())
+}
+
 func (c *sessionCall) SetDeadline(t time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
+	if c.closed || c.aborted {
 		return net.ErrClosed
 	}
 	return c.s.pc.SetDeadline(t)
@@ -674,7 +689,7 @@ func (c *sessionCall) SetDeadline(t time.Time) error {
 func (c *sessionCall) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	switch {
-	case c.closed:
+	case c.closed || c.aborted:
 		c.mu.Unlock()
 		return 0, net.ErrClosed
 	case c.headerAt < len(c.header):
@@ -734,7 +749,7 @@ func (c *sessionCall) Read(p []byte) (int, error) {
 func (c *sessionCall) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
+	if c.closed || c.aborted {
 		return 0, net.ErrClosed
 	}
 	if c.oneWay {

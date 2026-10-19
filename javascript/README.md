@@ -43,6 +43,15 @@ consent; the release packaging job packs the tarballs and retains them.
 Build the addon with CMake against an installed `abstraction_ipc` static prefix.
 Set `NODE_INCLUDE_DIR` to official Node-API headers and, on Windows,
 `NODE_IMPORT_LIBRARY` to the matching architecture's official `node.lib`.
+The MSVC target delay-loads its `node.exe` imports from the already loaded
+`libnode.dll` or host executable. This supports renamed Node-API hosts such as
+Electron without changing DLL search paths. The addon uses Node-API version 8;
+host compatibility still requires an actual load check. See
+[Electron's Windows native-module guidance](https://www.electronjs.org/docs/latest/tutorial/using-native-node-modules#a-note-about-win_delay_load_hook).
+On Windows, `HOST native_host_test.cjs ADDON ROOT` exercises the native
+`withinPath` export against `ROOT/own-identity/sentinel.txt` and the existing
+`ROOT/other-identity` folder. Supply only an owned fixture. This checks addon
+loading and file identity; it performs no runtime discovery or OA requests.
 Install this CMake package into its own package directory for a source build.
 Its installed package metadata includes `native/oa_ipc_node.node` in the npm
 file list. The source metadata keeps binaries in the optional platform packages.
@@ -84,9 +93,18 @@ Errors retain C ABI status and confirmed transfer count; an aborted write may
 have delivered more bytes than the confirmed prefix. One-way EOF acknowledges
 transport completion and supplies no durability receipt.
 
+Node and Bun ordinary calls use the shared C ABI's single-exchange path: one
+fresh connection per call, opaque bytes including empty frames, and no session
+negotiation or replay. They require native feature `SINGLE_EXCHANGE` (bit 4) and
+refuse older addons/libraries before I/O. Explicit `sessions:true` retains the
+native session pool; XPC retains its existing message transport. Both bindings
+pass unframed bytes to the same native owner. A failed empty request with zero
+confirmed payload bytes remains acceptance-unknown; its header may have arrived.
+
 The experimental `@openabstractions/ipc/bun` subpath provides the same framed
 transport for Bun, over the library `libraryPath()` resolves. A Worker owns each synchronous C ABI
-session call while the caller's event loop signals its cancellation handle.
+call while the caller's event loop signals its cancellation handle. Its
+`sessions` option selects the same fresh-call or pooled-call behavior as Node.
 `selectRuntime()` and `runtimeEndpoint()` call the shared library's installed
 selector and bootstrap query, the same ones the Node addon, C++ and Python use.
 A configured server expectation is marshalled as `oa_ipc_server_expectation`

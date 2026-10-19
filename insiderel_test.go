@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// [ID-F1] InsideRel answers by Within when folder exists, by spelling only
+// [ID-F9] InsideRel answers by Within when folder exists, by spelling only
 // when folder does not, and returns the remainder.
 func TestInsideRelExistingAndMissingFolder(t *testing.T) {
 	dir := t.TempDir()

@@ -1,6 +1,7 @@
 //go:build darwin && cgo
 
 #include "xpc_native.h"
+#include "sealed_resource_native.h"
 
 #include <AvailabilityMacros.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -26,6 +27,13 @@
 struct oa_xpc_cancel {
   atomic_uchar fired;
 };
+struct oa_xpc_process {
+  SecCodeRef code;
+};
+
+void *oa_xpc_process_sealed_resource_code(oa_xpc_process *p) {
+  return p ? p->code : NULL;
+}
 struct oa_xpc_request {
   xpc_object_t message;
   xpc_connection_t remote;
@@ -100,6 +108,8 @@ const char *oa_xpc_error_text(oa_xpc_status s) {
     return "unavailable";
   case OA_XPC_CALLER_PROOF_UNMET:
     return "caller proof unmet";
+  case OA_XPC_OCCURRENCE_ENDED:
+    return "captured process occurrence ended";
   default:
     return "system error";
   }
@@ -728,6 +738,83 @@ oa_xpc_status oa_xpc_request_identity(oa_xpc_request *r, oa_xpc_identity *i) {
     return OA_XPC_INVALID_ARGUMENT;
   *i = r->identity;
   return OA_XPC_OK;
+}
+static oa_xpc_status process_security_status(OSStatus status,
+                                             int32_t *security_status) {
+  *security_status = status;
+  if (status == errSecSuccess)
+    return OA_XPC_OK;
+  if (status == errSecCSNoSuchCode)
+    return OA_XPC_OCCURRENCE_ENDED;
+  return OA_XPC_SYSTEM;
+}
+oa_xpc_status oa_xpc_process_check(oa_xpc_process *p, int32_t *status) {
+  if (!p || !p->code || !status)
+    return OA_XPC_INVALID_ARGUMENT;
+  return process_security_status(
+      SecCodeCheckValidity(p->code, kSecCSDefaultFlags, NULL), status);
+}
+oa_xpc_status oa_xpc_request_retain_process(oa_xpc_request *r,
+                                            oa_xpc_process **out,
+                                            int32_t *status) {
+  if (!r || !out || !status)
+    return OA_XPC_INVALID_ARGUMENT;
+  *out = NULL;
+  *status = errSecSuccess;
+  if (!oa_xpc_request_active(r))
+    return OA_XPC_CLOSED;
+  if (!r->message || !r->identity.message_code_valid ||
+      !r->identity.connection_principal_message_coherent)
+    return OA_XPC_UNTRUSTED;
+  SecCodeRef code = NULL;
+  oa_xpc_status result = process_security_status(
+      SecCodeCreateWithXPCMessage(r->message, kSecCSDefaultFlags, &code), status);
+  if (result != OA_XPC_OK || !code) {
+    if (code)
+      CFRelease(code);
+    if (result == OA_XPC_OK)
+      *status = errSecInternalComponent;
+    return result == OA_XPC_OK ? OA_XPC_SYSTEM : result;
+  }
+  result = process_security_status(
+      SecCodeCheckValidity(code, kSecCSDefaultFlags, NULL), status);
+  if (result != OA_XPC_OK || !oa_xpc_request_active(r)) {
+    CFRelease(code);
+    return result != OA_XPC_OK ? result : OA_XPC_CLOSED;
+  }
+  oa_xpc_process *p = calloc(1, sizeof(*p));
+  if (!p) {
+    CFRelease(code);
+    *status = errSecAllocate;
+    return OA_XPC_SYSTEM;
+  }
+  p->code = code;
+  *out = p;
+  return OA_XPC_OK;
+}
+oa_xpc_status oa_xpc_process_retain(oa_xpc_process *p, oa_xpc_process **out,
+                                    int32_t *status) {
+  if (!out || !status)
+    return OA_XPC_INVALID_ARGUMENT;
+  *out = NULL;
+  oa_xpc_status result = oa_xpc_process_check(p, status);
+  if (result != OA_XPC_OK)
+    return result;
+  oa_xpc_process *copy = calloc(1, sizeof(*copy));
+  if (!copy) {
+    *status = errSecAllocate;
+    return OA_XPC_SYSTEM;
+  }
+  copy->code = (SecCodeRef)CFRetain(p->code);
+  *out = copy;
+  return OA_XPC_OK;
+}
+void oa_xpc_process_free(oa_xpc_process *p) {
+  if (p) {
+    if (p->code)
+      CFRelease(p->code);
+    free(p);
+  }
 }
 oa_xpc_status oa_xpc_request_reply(oa_xpc_request *r, const void *b, size_t n) {
   if (!r || (!b && n) || atomic_load(&r->closed) ||

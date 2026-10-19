@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +23,38 @@ import (
 )
 
 var framedSerial atomic.Uint64
+
+func TestStreamFrameVectors(t *testing.T) {
+	raw, err := os.ReadFile("../testdata/stream_frames.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors []struct{ Body, Wire string }
+	if err := json.Unmarshal(raw, &vectors); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vectors {
+		body, err := hex.DecodeString(v.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := hex.DecodeString(v.Wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var output bytes.Buffer
+		if err := WriteFrameTo(&output, body, DefaultMaxFrame); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(output.Bytes(), wire) {
+			t.Fatalf("wire %x want %x", output.Bytes(), wire)
+		}
+		actual, err := ReadFrameFrom(bytes.NewReader(wire), DefaultMaxFrame)
+		if err != nil || !bytes.Equal(actual, body) {
+			t.Fatalf("body %x %v", actual, err)
+		}
+	}
+}
 
 // Framing tests exercise bytes and lifecycle at the portable proof floor.
 // Production Program requirements remain separate and are tested below.

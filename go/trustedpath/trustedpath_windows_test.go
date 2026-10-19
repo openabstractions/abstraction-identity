@@ -3,6 +3,7 @@
 package trustedpath
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/openabstractions/abstraction-identity/fileid"
 	"golang.org/x/sys/windows"
 )
 
@@ -166,5 +168,134 @@ func TestASUSModelFilesPass(t *testing.T) {
 		if err := CheckFile(p, MachineOwners()); err != nil {
 			t.Fatalf("%s: %v", p, err)
 		}
+	}
+}
+
+// CheckFileWithin judges owners and access from root down: a folder above
+// root that grants another principal delete-child refuses CheckFile and
+// leaves CheckFileWithin to the protected state folder below it.
+func TestCheckFileWithinJudgesFromTheRootDown(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := user.User.Sid.String()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := filepath.Join(dir, "outer")
+	root := filepath.Join(outer, "StateK")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	icacls := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("icacls", args...).CombinedOutput(); err != nil {
+			t.Fatalf("icacls %q: %v %s", args, err, out)
+		}
+	}
+	icacls(root, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*"+account+":(OI)(CI)F")
+	icacls(outer, "/grant", "*S-1-1-0:(DC)")
+	record := filepath.Join(root, "model.files")
+	if err := os.WriteFile(record, []byte("record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	owners := MachineOwners()
+	owners.Account = true
+	if err := CheckFile(record, owners); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("CheckFile under a folder Everyone may empty: %v", err)
+	}
+	if err := CheckFileWithin(record, root, owners); err != nil {
+		t.Fatalf("CheckFileWithin from the protected state folder: %v", err)
+	}
+	// Go folds the Kelvin sign to K. The volume decides whether it
+	// names this directory or a different one.
+	twin := filepath.Join(outer, "State\u212a")
+	if err := os.Mkdir(twin, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	noLinks := fileid.Options{Links: fileid.RefuseLinks}
+	rootID, err := fileid.Resolve(ctx, fileid.Self, root, noLinks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twinID, err := fileid.Resolve(ctx, fileid.Self, twin, noLinks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = CheckFileWithin(record, twin, owners)
+	if rootID.Equal(twinID) {
+		if err != nil {
+			t.Fatalf("an alternate name for the protected state folder: %v", err)
+		}
+	} else if !errors.Is(err, ErrUntrusted) || !strings.Contains(err.Error(), "is not below") {
+		t.Fatalf("a different folder with a name that folds to the protected state folder: %v", err)
+	}
+	if err := CheckFileWithin(record, filepath.Join(dir, "elsewhere"), owners); !errors.Is(err, ErrUntrusted) || !strings.Contains(err.Error(), "is not below") {
+		t.Fatalf("a root not above the file: %v", err)
+	}
+	if err := CheckFileWithin(record, outer, owners); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("a root whose own ACL lets Everyone delete what it holds: %v", err)
+	}
+}
+
+// Decision 2, amendment 1: every folder above the state folder needs a
+// Medium or higher integrity label. A capability principal's rights on such
+// a folder are listed for the provider's start-up line, and a Low label on
+// it refuses the record.
+func TestCheckFileWithinNeedsMediumAboveTheRoot(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := filepath.Join(dir, "outer")
+	root := filepath.Join(outer, "state")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	icacls := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("icacls", args...).CombinedOutput(); err != nil {
+			t.Fatalf("icacls %q: %v %s", args, err, out)
+		}
+	}
+	icacls(root, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*"+user.User.Sid.String()+":(OI)(CI)F")
+	capability := "S-1-15-3-1024-1-2-3-4-5-6-7-8"
+	icacls(outer, "/grant", "*"+capability+":F")
+	record := filepath.Join(root, "model.files")
+	if err := os.WriteFile(record, []byte("record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	owners := MachineOwners()
+	owners.Account = true
+	if err := CheckFileWithin(record, root, owners); err != nil {
+		t.Fatalf("a capability's full control above the root, at Medium: %v", err)
+	}
+	if err := CheckFolderWithin(root, owners); err != nil {
+		t.Fatalf("the state folder itself: %v", err)
+	}
+	found := false
+	for _, line := range ForeignCapabilities(root) {
+		found = found || strings.Contains(line, outer) && strings.Contains(line, capability)
+	}
+	if !found {
+		t.Fatalf("the capability on %s was not listed: %q", outer, ForeignCapabilities(root))
+	}
+	icacls(outer, "/setintegritylevel", "medium")
+	if err := CheckFileWithin(record, root, owners); err != nil {
+		t.Fatalf("an explicit Medium label above the root: %v", err)
+	}
+	icacls(outer, "/setintegritylevel", "low")
+	if err := CheckFileWithin(record, root, owners); !errors.Is(err, ErrUntrusted) || !strings.Contains(err.Error(), "below Medium") {
+		t.Fatalf("a Low label above the root: %v", err)
+	}
+	if err := CheckFolderWithin(root, owners); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("the state folder under a Low folder: %v", err)
 	}
 }

@@ -25,7 +25,8 @@ type imageVersion struct {
 // signer, and adds the version resource of a trusted file. The resource is
 // read from the held handle before and after the verification, and the two
 // reads must agree, so the strings come from the bytes Windows verified: a
-// change in between is an error, as a path that moved is (stillSameFile).
+// change in between is an error. The peer and exported path callers also
+// enforce their own same-path binding after this held-file operation.
 // Neither a running image (its mapped section) nor a file VerifyFile holds
 // (verifyFileShare) can be opened for writing during the span; the second
 // read is the check that does not rest on either. A trusted file whose
@@ -36,17 +37,26 @@ type imageVersion struct {
 // it returns the .mui's resource (powershell.exe's reads OriginalFilename
 // PowerShell.EXE.MUI).
 func verifyHeld(file windows.Handle, pathW *uint16, revocation bool) (Code, Proof, error) {
+	return verifyHeldCaptured(file, pathW, revocation, nil)
+}
+
+func verifyHeldCaptured(file windows.Handle, pathW *uint16, revocation bool, publisherKey *string) (Code, Proof, error) {
 	before, beforeErr := heldVersion(file)
-	code, verdict := verifyTrust(file, pathW, revocation)
-	code = withSigner(code, pathW)
+	code, verdict := verifyTrustCaptured(file, pathW, revocation, publisherKey)
 	if !code.Trusted {
 		return code, verdict, nil
 	}
 	after, afterErr := heldVersion(file)
 	if errors.Is(beforeErr, errUnreadable) || errors.Is(afterErr, errUnreadable) {
+		if publisherKey != nil {
+			*publisherKey = ""
+		}
 		return Code{}, ProofNone, fmt.Errorf("the file's version resource could not be read: %w", errors.Join(beforeErr, afterErr))
 	}
 	if after != before || (beforeErr == nil) != (afterErr == nil) {
+		if publisherKey != nil {
+			*publisherKey = ""
+		}
 		return Code{}, ProofNone, errors.New("the file's version resource changed during verification")
 	}
 	code.Description, code.OriginalName = after.description, after.originalName

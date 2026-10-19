@@ -13,6 +13,19 @@ native bootstrap, bounded framed bytes, deadlines and cancellation. Generated
 Rust capability clients use this transport through the shared framing trait.
 Transport evidence and each capability behavior have separate scopes. It contains no service, local provider or per-capability JSON.
 
+Ordinary framed calls require the native single-exchange feature and refuse an
+older library before I/O. The shared native call owns framing, limits and the
+total waiting budget. `Error.transferred` is its confirmed request-payload count;
+zero does not establish that an empty request's header was never delivered.
+Failures preserve unknown acceptance and never replay automatically.
+
+When the native open-failure feature is present, stream calls opt in to
+`OPEN_IO_ERROR` (10), affirmative proof of an initial open I/O failure before
+any protocol write attempt. Older libraries still connect and return their
+existing statuses, supplying no such proof. `IO_ERROR` with zero transferred
+payload bytes remains acceptance-unknown. This additive ABI-1 status requires
+matching unreleased SDK artifacts and changes no generated service/wire record.
+
 For authenticated local use, obtain a `ServerExpectation` from `select_runtime`,
 the shared C ABI selector for the installed runtime, or from independent host
 configuration, and pass it to `with_server_expectation`. The raw transport

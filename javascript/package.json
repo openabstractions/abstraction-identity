@@ -17,9 +17,10 @@
   "exports": {
     ".": {"types": "./index.d.ts", "default": "./index.js"},
     "./bun": {"types": "./bun.d.ts", "default": "./bun.js"},
-    "./path": {"types": "./path.d.ts", "default": "./path.js"}
+    "./path": {"types": "./path.d.ts", "default": "./path.js"},
+    "./stream": {"types": "./stream.d.ts", "default": "./stream.js"}
   },
-  "files": ["index.js", "index.d.ts", "bun.js", "bun.d.ts", "bun-worker.js", "platform.js", "platform.d.ts", "path.js", "path.d.ts", "README.md"],
+  "files": ["index.js", "index.d.ts", "bun.js", "bun.d.ts", "bun-worker.js", "platform.js", "platform.d.ts", "path.js", "path.d.ts", "stream.js", "stream.d.ts", "js", "README.md"],
   "optionalDependencies": {
     "@openabstractions/ipc-darwin-arm64": "0.0.0",
     "@openabstractions/ipc-darwin-x64": "0.0.0",

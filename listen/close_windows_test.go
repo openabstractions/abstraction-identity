@@ -65,20 +65,7 @@ func TestCloseUnblocksPendingAcceptAndRemainsClosed(t *testing.T) {
 			}
 			done <- err
 		}()
-		deadline := time.Now().Add(time.Second)
-		for {
-			p := l.(*pipeListener)
-			p.mu.Lock()
-			pending := p.accepting
-			p.mu.Unlock()
-			if pending {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("Accept did not enter pending connect")
-			}
-			time.Sleep(time.Millisecond)
-		}
+		l.(*pipeListener).waitForPendingAccept(t)
 		if err := l.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -94,6 +81,23 @@ func TestCloseUnblocksPendingAcceptAndRemainsClosed(t *testing.T) {
 			t.Fatalf("closed Accept: %v", err)
 		}
 		_ = l.Close()
+	}
+}
+
+func (l *pipeListener) waitForPendingAccept(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		l.mu.Lock()
+		pending := l.accepting
+		l.mu.Unlock()
+		if pending {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Accept did not enter pending connect")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

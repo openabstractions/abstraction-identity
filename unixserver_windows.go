@@ -49,7 +49,7 @@ func bindUnixServer(h Handle, opts *Options) (binder, *Peer, error) {
 	if pid == 0 {
 		return nil, nil, fmt.Errorf("%w: the kernel names no process for the socket's server", ErrNoBinding)
 	}
-	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, pid)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: pid %d could not be opened (%v)", ErrPeerGone, pid, err)
 	}
@@ -114,11 +114,7 @@ func (b *unixServerWindowsBinding) recheck() error {
 }
 
 func (b *unixServerWindowsBinding) alive() (bool, error) {
-	var code uint32
-	if err := windows.GetExitCodeProcess(b.proc, &code); err != nil {
-		return false, err
-	}
-	return code == stillActive, nil
+	return windowsProcessAlive(b.proc)
 }
 
 func (b *unixServerWindowsBinding) release() error {
@@ -153,14 +149,10 @@ func pinnedProcessPeer(proc windows.Handle, pid uint32, started time.Time, trans
 		return nil, fmt.Errorf("%w: QueryFullProcessImageName: %v", ErrNoBinding, err)
 	}
 	p.Path = attr("path", imagePath, ProofBound, "read through the pinned process handle; a path is not an identity - see CONTRACT.md")
-	if name, err := packageFullName(proc); err == nil && name != "" {
-		p.Package = attr("package", name, ProofSigned, "an MSIX package full name read through the pinned process handle")
-	} else {
-		p.Package = unknown[string]("package", "the peer is an ordinary executable, not an MSIX package")
-	}
+	p.Package = packageOf(proc, "an MSIX package full name read through the pinned process handle")
 	if opts.skipCodeSignature() {
 		p.Code = unknown[Code]("code", "signature verification was skipped by the caller")
-	} else if code, verdict, verifiedAt, err := verifyProcessImageAt(proc, pid, started, imagePath, opts); err != nil {
+	} else if code, verdict, verifiedAt, err := verifyProcessImageAt(proc, pid, started, imagePath, user.SID, opts); err != nil {
 		p.Code = unknown[Code]("code", "verification could not be performed: "+err.Error())
 	} else {
 		p.recordCode(code, verdict, "Authenticode verified the file at the peer's image path, not the image the peer is executing")

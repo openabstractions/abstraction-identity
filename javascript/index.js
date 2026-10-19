@@ -1,9 +1,15 @@
 import {createRequire} from 'node:module';
 import {isAbsolute} from 'node:path';
 import {addonFile, platformFile, platformIdentity, platformLibrary, platformPackage} from './platform.js';
+// The status codes, frame bounds and call budget of identity.thrift
+// (abstraction-ipc CONTRACT.md IPC-E1, IPC-F1, IPC-D1), generated beside this file.
+import * as ipc from './js/abstraction/ipc/constants/index.mjs';
+// OpenIoError is the optional ABI-1 native open-phase extension (feature 8).
 const require = createRequire(import.meta.url);
-export const Status = Object.freeze({Ok:0, Timeout:1, Disconnected:2, IoError:3,
-  InvalidArgument:4, NoMemory:5, InternalError:6, Cancelled:7, Untrusted:8, ProofUnavailable:9});
+export const Status = Object.freeze({Ok:ipc.ipcOk, Timeout:ipc.ipcTimeout, Disconnected:ipc.ipcDisconnected,
+  IoError:ipc.ipcIoError, InvalidArgument:ipc.ipcInvalidArgument, NoMemory:ipc.ipcNoMemory,
+  InternalError:ipc.ipcInternalError, Cancelled:ipc.ipcCancelled, Untrusted:ipc.ipcUntrusted,
+  ProofUnavailable:ipc.ipcProofUnavailable, OpenIoError:10});
 /** The development addon a source build installs beside this file. */
 const developmentAddon = './native/oa_ipc_node.node';
 /**
@@ -59,13 +65,34 @@ async function waiting(deadline, cancellation, invoke) {
   } finally { clearTimeout(timer);cancellation?.removeEventListener('abort',abort); }
 }
 export function runtimeEndpoint() { return native().runtimeEndpoint(); }
+export const ActivationOutcome = Object.freeze({None:0, RequestCompleted:1, EndpointPresent:2,
+  UpgradeInProgress:3, Refused:4});
+/** Request activation using independent evidence and the caller's remaining budget. */
+export function activateRuntime(expected, {timeout=ipc.ipcDefaultCallBudgetMs, deadline=null, cancellation=null}={}) {
+  if (!expected || ![1,2].includes(expected.principalKind) ||
+      [expected.principal,expected.program].some(v=>typeof v!=='string'||!v||v.includes('\0')) ||
+      !Number.isFinite(timeout)||timeout<0||timeout>0xffffffff||(deadline!==null&&!Number.isFinite(deadline)) ||
+      (cancellation!==null && (typeof cancellation.addEventListener!=='function'||typeof cancellation.removeEventListener!=='function')))
+    return Promise.reject(new TypeError('invalid activation request'));
+  const server=Object.freeze({...expected});
+  const end=deadline??performance.now()+timeout;
+  return waiting(end,cancellation,async(api,signal,ms)=>{
+    if(typeof api.activateRuntime!=='function')
+      throw new FrameError(Status.ProofUnavailable,'native runtime activation unavailable');
+    const outcome=await api.activateRuntime(server,ms,signal);
+    if(cancellation?.aborted)throw new FrameError(Status.Cancelled,'waiting cancelled');
+    if(performance.now()>=end)throw new FrameError(Status.Timeout,'runtime activation deadline expired');
+    if(![1,2,3,4].includes(outcome)) throw new FrameError(Status.InternalError,'invalid native activation outcome');
+    return outcome;
+  });
+}
 /**
  * The installed runtime's identity from the shared native selector, the one the
  * Go, C++ and Python defaults use. It connects to nothing and starts nothing.
  * No installation, or an ambiguous one, rejects with Status.Untrusted; a platform
  * without the required facilities rejects with Status.ProofUnavailable.
  */
-export function selectRuntime({timeout=5000, deadline=null, cancellation=null}={}) {
+export function selectRuntime({timeout=ipc.ipcDefaultCallBudgetMs, deadline=null, cancellation=null}={}) {
   if (!Number.isFinite(timeout)||timeout<0||timeout>0xffffffff||(deadline!==null&&!Number.isFinite(deadline)) ||
       (cancellation!==null && (typeof cancellation.addEventListener!=='function'||typeof cancellation.removeEventListener!=='function')))
     return Promise.reject(new TypeError('invalid selection waiting'));
@@ -80,6 +107,7 @@ export class NativeConnector {
   connect(endpoint, options={}) { return new FrameTransport(endpoint, options); }
   runtimeEndpoint() { return runtimeEndpoint(); }
   selectRuntime(options={}) { return selectRuntime(options); }
+  activateRuntime(expected, options={}) { return activateRuntime(expected, options); }
 }
 export class FrameTransport {
   /**
@@ -87,11 +115,11 @@ export class FrameTransport {
    * pool (FRAMING.md "Sessions"); ask only where the server answers or closes an
    * oversized header.
    */
-  constructor(endpoint, {timeout=5000, deadline=null, cancellation=null, maxFrame=1048576, server=null, sessions=false}={}) {
+  constructor(endpoint, {timeout=ipc.ipcDefaultCallBudgetMs, deadline=null, cancellation=null, maxFrame=ipc.ipcDefaultMaxFrame, server=null, sessions=false}={}) {
     if (typeof endpoint!=='string'||!endpoint||endpoint.includes('\0') ||
         !Number.isFinite(timeout)||timeout<0||timeout>0xffffffff ||
         (deadline!==null&&!Number.isFinite(deadline)) ||
-        !Number.isInteger(maxFrame)||maxFrame<1||maxFrame>2097152 ||
+        !Number.isInteger(maxFrame)||maxFrame<1||maxFrame>ipc.ipcClientMaxFrame ||
         (cancellation!==null && (typeof cancellation.addEventListener!=='function'||typeof cancellation.removeEventListener!=='function')))
       throw new TypeError('invalid frame binding');
     if(server!==null && (![1,2].includes(server.principalKind)||
@@ -116,7 +144,12 @@ export class FrameTransport {
     if (!(frame instanceof Uint8Array)||frame.byteLength>this.maxFrame)
       return Promise.reject(new FrameError(Status.InvalidArgument,'frame must be bounded Uint8Array'));
     return waiting(this.deadline??performance.now()+this.timeout,this.cancellation,
-      (api,signal,ms)=>api.call(this.endpoint,frame,ms,signal,this.maxFrame,reply,this.server,this.sessions));
+      (api,signal,ms)=>{
+        if(!this.sessions&&!this.endpoint.startsWith('xpc:')&&
+            (typeof api.features!=='function'||!(api.features()&4)))
+          throw new FrameError(Status.ProofUnavailable,'native single exchange unavailable');
+        return api.call(this.endpoint,frame,ms,signal,this.maxFrame,reply,this.server,this.sessions);
+      });
   }
   exchangeFrame(frame) { return this.#call(frame,true); }
   writeFrame(frame) { return this.#call(frame,false); }

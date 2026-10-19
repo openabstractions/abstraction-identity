@@ -1,11 +1,21 @@
 import {dlopen, ptr, read, toArrayBuffer} from 'bun:ffi';
 
-const OK = 0, INTERNAL_ERROR = 6, PROOF_UNAVAILABLE = 9, FEATURE_XPC = 1;
+const OK = 0, INTERNAL_ERROR = 6, PROOF_UNAVAILABLE = 9, FEATURE_XPC = 1, FEATURE_SINGLE_EXCHANGE = 4, CALL_SINGLE_EXCHANGE = 2;
+const FEATURE_OPEN_FAILURE = 8, CALL_REPORT_OPEN_FAILURE = 4;
 const EXPECTATION_SIZE = 48;
 const utf8 = new TextDecoder('utf-8', {fatal: true});
 
 function optional(library, symbols) {
   try { return dlopen(library, symbols).symbols; } catch { return null; }
+}
+
+function features(library) {
+  let handle;
+  try {
+    handle = dlopen(library, {oa_ipc_features: {args: [], returns: 'u32'}});
+    return handle.symbols.oa_ipc_features();
+  } catch { return 0; }
+  finally { handle?.close(); }
 }
 
 /* oa_ipc_server_expectation, version 1, on the 64-bit little-endian platforms
@@ -33,9 +43,14 @@ function call(request) {
   let library;
   let replyPointer = 0;
   try {
+    const single = !request.sessions && !request.endpoint.startsWith('xpc:');
+    const capabilities = features(request.library);
+    if (single) {
+      if (!(capabilities & FEATURE_SINGLE_EXCHANGE))
+        return {status: PROOF_UNAVAILABLE, sent: 0, message: 'native single exchange unavailable'};
+    }
     if (request.endpoint.startsWith('xpc:')) {
-      const features = optional(request.library, {oa_ipc_features: {args: [], returns: 'u32'}});
-      if (!request.server || !features || (features.oa_ipc_features() & FEATURE_XPC) === 0) {
+      if (!request.server || (capabilities & FEATURE_XPC) === 0) {
         return {status: PROOF_UNAVAILABLE, sent: 0,
           message: 'XPC endpoints require a server identity expectation and a library with XPC support'};
       }
@@ -51,14 +66,15 @@ function call(request) {
     const reply = new BigUint64Array(1);
     const sent = new BigUint64Array(1);
     const status = library.symbols.oa_ipc_session_call(endpoint, BigInt(endpoint.byteLength), request.timeout,
-      request.cancellation, server, frame, BigInt(frame.byteLength), request.maxFrame,
-      request.reply ? 0 : 1, reply, sent);
+      request.cancellation, server, frame.byteLength ? frame : null, BigInt(frame.byteLength), request.maxFrame,
+      (request.reply ? 0 : 1) | (single ? CALL_SINGLE_EXCHANGE : 0) |
+        (!request.endpoint.startsWith('xpc:') && (capabilities & FEATURE_OPEN_FAILURE) ? CALL_REPORT_OPEN_FAILURE : 0), reply, sent);
     replyPointer = Number(reply[0]);
     let bytes = null;
     if (status === OK && request.reply) {
       const length = new BigUint64Array(1);
       const data = library.symbols.oa_ipc_reply_data(replyPointer, length);
-      bytes = new Uint8Array(toArrayBuffer(data, 0, Number(length[0]))).slice();
+      bytes = length[0] === 0n ? new Uint8Array() : new Uint8Array(toArrayBuffer(data, 0, Number(length[0]))).slice();
     }
     keep.length = 0;
     return {status, sent: Number(sent[0]), reply: bytes};
@@ -102,10 +118,30 @@ function select(request) {
   }
 }
 
+function activate(request) {
+  let library;
+  const keep=[];
+  try {
+    try {
+      library=dlopen(request.library, {
+        oa_ipc_features:{args:[],returns:'u32'},
+        oa_ipc_activate_runtime:{args:['ptr','u32','ptr','ptr'],returns:'i32'},
+      });
+    } catch { return {status:PROOF_UNAVAILABLE,message:'native runtime activation unavailable'}; }
+    if (!(library.symbols.oa_ipc_features() & 2))
+      return {status:PROOF_UNAVAILABLE,message:'native runtime activation unavailable'};
+    const server=expectation(request.server,keep),outcome=new Int32Array(1);
+    const status=library.symbols.oa_ipc_activate_runtime(server,request.timeout,request.cancellation,outcome);
+    if(status===OK && ![1,2,3,4].includes(outcome[0]))
+      return {status:INTERNAL_ERROR,message:'invalid native activation outcome'};
+    return {status,outcome:outcome[0],message:'installed runtime activation failed'};
+  } finally { library?.close(); }
+}
+
 self.onmessage = (event) => {
   const request = event.data;
   try {
-    const result = request.op === 'select' ? select(request) : call(request);
+    const result = request.op === 'select' ? select(request) : request.op === 'activate' ? activate(request) : call(request);
     self.postMessage(result, result.reply ? [result.reply.buffer] : []);
   } catch (error) {
     self.postMessage({status: INTERNAL_ERROR, message: error instanceof Error ? error.message : String(error), sent: 0});

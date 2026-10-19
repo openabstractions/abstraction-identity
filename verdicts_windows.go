@@ -37,7 +37,10 @@ import (
 // and CheckRevocation is part of the key. Failed verifications are not kept.
 const (
 	codeVerdictLifetime = 5 * time.Minute
-	codeVerdictLimit    = 256
+	// New captures refresh with enough overlap for a 30-second presence lease
+	// and its 10-second renewal cadence. Existing captures keep their deadline.
+	codeVerdictRefreshAhead = 30 * time.Second
+	codeVerdictLimit        = 256
 )
 
 type codeVerdictKey struct {
@@ -65,27 +68,65 @@ type codeVerification struct {
 // verifyFile is verifyImage; tests count verifications through it.
 var verifyFile = verifyImage
 
+var codeVerdictNow = time.Now
+
 var codeVerdicts = struct {
 	sync.Mutex
 	entries map[codeVerdictKey]*codeVerdict
 	working map[codeVerdictKey]*codeVerification
 }{entries: map[codeVerdictKey]*codeVerdict{}, working: map[codeVerdictKey]*codeVerification{}}
 
+// maxVerificationsPerAccount bounds the first-time code verifications one
+// account has running at once [ID-V1]. A verification hashes the whole image,
+// 150 ms or more for node.exe (ID-W2), so a burst of new processes from one
+// account would otherwise hold a verification thread each. A peer over the
+// bound is told no code answer with the reason, and a later connection of it
+// verifies once a slot is free; a reused or shared verdict takes no slot.
+const maxVerificationsPerAccount = 4
+
+var verificationSlots = struct {
+	sync.Mutex
+	running map[string]int
+}{running: map[string]int{}}
+
+// errVerificationBudget refuses a verification over its account's bound.
+var errVerificationBudget = errors.New("identity: this account already has the most code verifications running at once (ID-V1)")
+
+// takeVerificationSlot reserves one of account's verification slots, or
+// refuses with errVerificationBudget when all are taken.
+func takeVerificationSlot(account string) (release func(), err error) {
+	verificationSlots.Lock()
+	defer verificationSlots.Unlock()
+	if verificationSlots.running[account] >= maxVerificationsPerAccount {
+		return nil, errVerificationBudget
+	}
+	verificationSlots.running[account]++
+	return func() {
+		verificationSlots.Lock()
+		defer verificationSlots.Unlock()
+		if verificationSlots.running[account]--; verificationSlots.running[account] <= 0 {
+			delete(verificationSlots.running, account)
+		}
+	}, nil
+}
+
 // verifyProcessImage is verifyImage for a pinned peer process, reusing a verdict
-// already reached for this process instance at this image path.
+// already reached for this process instance at this image path. It counts
+// against the slots of the empty account, which tests use.
 func verifyProcessImage(proc windows.Handle, pid uint32, started time.Time, imagePath string, opts *Options) (code Code, verdict Proof, err error) {
-	code, verdict, _, err = verifyProcessImageAt(proc, pid, started, imagePath, opts)
+	code, verdict, _, err = verifyProcessImageAt(proc, pid, started, imagePath, "", opts)
 	return code, verdict, err
 }
 
 // verifyProcessImageAt also returns when the verdict was verified. A binding
 // reusing this evidence must preserve that original time, not restart its age.
-func verifyProcessImageAt(proc windows.Handle, pid uint32, started time.Time, imagePath string, opts *Options) (code Code, verdict Proof, at time.Time, err error) {
+// A verification it starts takes one of account's slots (ID-V1).
+func verifyProcessImageAt(proc windows.Handle, pid uint32, started time.Time, imagePath, account string, opts *Options) (code Code, verdict Proof, at time.Time, err error) {
 	key := codeVerdictKey{pid: pid, started: started.UnixNano(), image: imagePath, revocation: opts.checkRevocation()}
 	codeVerdicts.Lock()
 	if entry, ok := codeVerdicts.entries[key]; ok {
-		now := time.Now()
-		if now.Sub(entry.at) < codeVerdictLifetime && !now.Before(entry.at) {
+		now := codeVerdictNow()
+		if now.Sub(entry.at) < codeVerdictLifetime-codeVerdictRefreshAhead && !now.Before(entry.at) {
 			codeVerdicts.Unlock()
 			return entry.code, entry.verdict, entry.at, nil
 		}
@@ -111,9 +152,15 @@ func verifyProcessImageAt(proc windows.Handle, pid uint32, started time.Time, im
 		close(working.done)
 		codeVerdicts.Unlock()
 	}()
+	release, err := takeVerificationSlot(account)
+	if err != nil {
+		completed = true
+		return Code{}, ProofNone, time.Time{}, err
+	}
+	defer release()
 	code, verdict, err = verifyFile(proc, imagePath, opts)
 	if err == nil {
-		at = time.Now()
+		at = codeVerdictNow()
 		keepVerdict(key, proc, code, verdict, at)
 	}
 	completed = true

@@ -1,13 +1,14 @@
 package privatedir
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 
 	identity "github.com/openabstractions/abstraction-identity"
+	"github.com/openabstractions/abstraction-identity/fileid"
 )
 
 // ErrNotModelFolder reports a folder CheckModelFolder or ProtectModelFolder
@@ -28,8 +29,8 @@ var ErrNotModelFolder = errors.New("privatedir: folder is not a model folder of 
 // path; no inheritance is propagated by the system. The whole folder is
 // refused, and nothing changes, when dir or anything below it is a link or
 // junction, or a file below it has another name outside every folder in
-// roots (on Windows its names are enumerated; elsewhere a file of more
-// than one name is refused). Every root that exists must pass
+// roots (on Windows its names are enumerated; on Unix a complete inode
+// inventory under the held roots accounts for every name). Every root that exists must pass
 // CheckModelsRoot, so a broad root such as a drive root or the home cannot
 // widen what counts as OA's own; a root that does not exist holds no name
 // and is left out. dir must lie under one of roots. It then applies
@@ -38,31 +39,117 @@ func ProtectModelFolder(dir string, roots []string) error {
 	if !filepath.IsAbs(dir) {
 		return fmt.Errorf("%w: %q is not absolute", ErrNotModelFolder, dir)
 	}
-	dir = filepath.Clean(dir)
-	clean := make([]string, 0, len(roots))
+	if err := fileid.OlderPath(dir); err != nil {
+		return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
+	}
+	d, err := fileid.Open(context.Background(), fileid.Self, dir, fileid.Options{Links: fileid.RefuseLinks})
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
+	}
+	defer d.Close()
+	var held []fileid.Handle
+	defer func() {
+		for _, h := range held {
+			h.Close()
+		}
+	}()
 	for _, r := range roots {
 		if !filepath.IsAbs(r) {
 			return fmt.Errorf("%w: root %q is not absolute", ErrNotModelFolder, r)
 		}
-		r = filepath.Clean(r)
-		if err := identity.LocalPath(r); err != nil {
-			return fmt.Errorf("%w: root %s: %v", ErrNotModelFolder, r, err)
+		if err := fileid.OlderPath(r); err != nil {
+			return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
 		}
-		if _, err := os.Lstat(r); errors.Is(err, fs.ErrNotExist) {
+		h, err := fileid.Open(context.Background(), fileid.Self, r, fileid.Options{Links: fileid.RefuseLinks})
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if err := CheckModelsRoot(r); err != nil {
-			return err
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
 		}
-		clean = append(clean, r)
+		if !fileid.SamePathName(h.FileID().Path(), filepath.Clean(r)) {
+			h.Close()
+			return fmt.Errorf("%w: root does not name its final folder", ErrNotModelFolder)
+		}
+		held = append(held, h)
 	}
-	if !under(dir, clean) {
-		return fmt.Errorf("%w: %s lies under none of %q", ErrNotModelFolder, dir, clean)
+	return ProtectModelFolderAt(d, held)
+}
+
+// ProtectModelFolderAt applies ProtectModelFolder's ownership rule to live
+// admitted files. Handles are borrowed for this synchronous operation and
+// remain owned by the caller. A moved/replaced locator is refused before
+// effects; protection and its final check use the admitted held file.
+func ProtectModelFolderAt(dir fileid.Handle, roots []fileid.Handle) error {
+	if err := currentModelHandle(dir); err != nil {
+		return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
 	}
-	if err := protectModels(dir, clean); err != nil {
-		return fmt.Errorf("%w: %s: %v", ErrNotModelFolder, dir, err)
+	inside := false
+	for _, root := range roots {
+		if err := currentModelHandle(root); err != nil {
+			return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
+		}
+		if err := checkModelRootAt(root); err != nil {
+			return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
+		}
+		relation, err := dir.Relate(root)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
+		}
+		inside = inside || relation.Kind != fileid.RelationOutside
 	}
-	return CheckModelFolder(dir)
+	if !inside {
+		return fmt.Errorf("%w: admitted folder lies under none of the roots", ErrNotModelFolder)
+	}
+	if err := protectModelsAt(dir, roots); err != nil {
+		return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
+	}
+	return nil
+}
+
+func currentModelHandle(h fileid.Handle) error {
+	if h.File() == nil || h.FileID().IsZero() {
+		return fileid.ErrNoFile
+	}
+	st, err := h.File().Stat()
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() || !h.FileID().IsDir() {
+		return errors.New("it is not a directory")
+	}
+	current, err := fileid.Open(context.Background(), fileid.Self, h.FileID().Path(), fileid.Options{Links: fileid.RefuseLinks})
+	if err != nil {
+		return err
+	}
+	defer current.Close()
+	if !current.FileID().Equal(h.FileID()) {
+		return errors.New("admitted folder changed at its locator")
+	}
+	return nil
+}
+
+func checkModelRootAt(root fileid.Handle) error {
+	p := root.FileID().Path()
+	if filepath.Dir(p) == p {
+		return errors.New("it is a drive or volume root")
+	}
+	known := modelKnownFolders()
+	for i, p := range known {
+		h, err := fileid.Open(context.Background(), fileid.Self, p, fileid.Options{})
+		if err != nil {
+			if i == 0 {
+				return fmt.Errorf("the home cannot be compared: %w", err)
+			}
+			continue
+		}
+		relation, err := h.Relate(root)
+		h.Close()
+		if err != nil || relation.Kind == fileid.RelationSame || (i == 0 && relation.Kind == fileid.RelationInside) {
+			return fmt.Errorf("it is or holds a known folder: %s", p)
+		}
+	}
+	return nil
 }
 
 // CheckModelFolder refuses dir (ErrNotModelFolder) unless it is a model
@@ -71,7 +158,15 @@ func CheckModelFolder(dir string) error {
 	if !filepath.IsAbs(dir) {
 		return fmt.Errorf("%w: %q is not absolute", ErrNotModelFolder, dir)
 	}
-	if err := checkModels(filepath.Clean(dir)); err != nil {
+	if err := fileid.OlderPath(dir); err != nil {
+		return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
+	}
+	h, err := fileid.Open(context.Background(), fileid.Self, dir, fileid.Options{Links: fileid.RefuseLinks})
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrNotModelFolder, err)
+	}
+	defer h.Close()
+	if err := checkModelsAt(h); err != nil {
 		return fmt.Errorf("%w: %s: %v", ErrNotModelFolder, dir, err)
 	}
 	return nil
@@ -83,31 +178,30 @@ func CheckModelFolder(dir string) error {
 // Downloads, AppData and its Roaming and Local folders); when it or any
 // folder above it is a link or junction; when it does not resolve to
 // itself (ID-D3); and when it does not exist or identity.LocalPath refuses
-// it, since the home check cannot then be made (ID-F1).
+// it, since the home check cannot then be made (ID-F9).
 func CheckModelsRoot(root string) error {
 	if !filepath.IsAbs(root) {
 		return fmt.Errorf("%w: models root %q is not absolute", ErrNotModelFolder, root)
 	}
-	root = filepath.Clean(root)
-	if filepath.Dir(root) == root {
-		return fmt.Errorf("%w: models root %s is a drive or volume root", ErrNotModelFolder, root)
-	}
-	// A root identity refuses (a share, a network volume) cannot be compared
-	// with the home, so it is refused before any comparison (ID-F1).
-	if err := identity.LocalPath(root); err != nil {
+	if err := fileid.OlderPath(root); err != nil {
 		return fmt.Errorf("%w: models root %s: %v", ErrNotModelFolder, root, err)
 	}
-	if _, err := os.Lstat(root); err != nil {
+	h, err := fileid.Open(context.Background(), fileid.Self, root, fileid.Options{Links: fileid.RefuseLinks})
+	if err != nil {
 		return fmt.Errorf("%w: models root %s: %v", ErrNotModelFolder, root, err)
 	}
-	if err := checkRoot(root); err != nil {
+	defer h.Close()
+	if !h.FileID().IsDir() || !identity.SamePathName(h.FileID().Path(), filepath.Clean(root)) {
+		return fmt.Errorf("%w: root does not name its final folder", ErrNotModelFolder)
+	}
+	if err := checkModelRootAt(h); err != nil {
 		return fmt.Errorf("%w: models root %s: %v", ErrNotModelFolder, root, err)
 	}
 	return nil
 }
 
-// under reports whether p is one of roots or lies below one, by file identity
-// (identity.SameFile and identity.Within). A root that cannot be compared,
+// under reports whether p is one of roots or lies below one, by native identity.
+// A root that cannot be compared,
 // such as one LocalPath refuses, does not count: the caller refuses p unless
 // it is under a root.
 func under(p string, roots []string) bool {
@@ -122,18 +216,24 @@ func under(p string, roots []string) bool {
 // underRoot is under for one root, with the identity error when p and root
 // could not be compared.
 func underRoot(p, root string) (bool, error) {
-	same, err := identity.SameFile(p, root)
-	if err == nil && same {
-		return true, nil
+	if err := fileid.OlderPath(p); err != nil {
+		return false, err
 	}
-	inside, werr := identity.Within(p, root)
-	if werr == nil {
-		return inside, nil
+	if err := fileid.OlderPath(root); err != nil {
+		return false, err
 	}
-	if err == nil {
-		err = werr
+	h, err := fileid.Open(context.Background(), fileid.Self, p, fileid.Options{})
+	if err != nil {
+		return false, err
 	}
-	return false, err
+	defer h.Close()
+	r, err := fileid.Open(context.Background(), fileid.Self, root, fileid.Options{})
+	if err != nil {
+		return false, err
+	}
+	defer r.Close()
+	relation, err := h.Relate(r)
+	return relation.Kind != fileid.RelationOutside && err == nil, err
 }
 
 // holds reports whether p is one of others or holds one of them. Any other

@@ -11,6 +11,8 @@ export declare const Status: Readonly<{
   Cancelled: 7;
   Untrusted: 8;
   ProofUnavailable: 9;
+  /** Native opt-in proof that initial stream open failed before any protocol write. */
+  OpenIoError: 10;
 }>;
 export type Status = (typeof Status)[keyof typeof Status];
 
@@ -54,12 +56,17 @@ export interface SelectionOptions {
  * Status.ProofUnavailable where the platform lacks the facilities.
  */
 export declare function selectRuntime(options?: SelectionOptions): Promise<Readonly<ServerExpectation>>;
+export declare const ActivationOutcome: Readonly<{None:0; RequestCompleted:1; EndpointPresent:2; UpgradeInProgress:3; Refused:4}>;
+export type ActivationOutcome = 0 | 1 | 2 | 3 | 4;
+/** Requires a paired native activation extension. Outcomes 1/2 permit a verified retry. */
+export declare function activateRuntime(expected: ServerExpectation, options?: SelectionOptions): Promise<ActivationOutcome>;
 
 export declare class NativeConnector {
   supports(scope: string, transport: string): boolean;
   connect(endpoint: string, options?: FrameOptions): FrameTransport;
   runtimeEndpoint(): string;
   selectRuntime(options?: SelectionOptions): Promise<Readonly<ServerExpectation>>;
+  activateRuntime(expected: ServerExpectation, options?: SelectionOptions): Promise<ActivationOutcome>;
 }
 
 export declare class FrameTransport {

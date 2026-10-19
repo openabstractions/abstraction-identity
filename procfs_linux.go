@@ -13,6 +13,7 @@ package identity
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -170,31 +171,43 @@ var clockTicks = sync.OnceValue(func() int64 {
 // would make every peer look like a Flatpak app. Creating it needs root, which
 // is a bigger problem than this function - but it is the reason the result is
 // prefixed and reported with its provenance rather than as a bare id.
+//
+// whyNoSandbox, the answer SameView reads as this process's view, is given
+// only when .flatpak-info is absent and the cgroup was read. A read that
+// fails otherwise (the process gone, hidepid, EACCES) answers its own
+// reason: missing evidence never reads as no sandbox.
 func sandboxPackage(pid int) (string, string) {
 	root := "/proc/" + itoa(pid)
 
-	if b, err := os.ReadFile(root + "/root/.flatpak-info"); err == nil {
+	b, err := os.ReadFile(root + "/root/.flatpak-info")
+	if err == nil {
 		if app := iniValue(string(b), "Application", "name"); app != "" {
 			return "flatpak:" + app,
 				"read from .flatpak-info inside the peer's own mount namespace, which bubblewrap mounts read-only"
 		}
 		return "flatpak:", "the peer is in a Flatpak sandbox whose .flatpak-info names no application"
 	}
-	// An unreadable or absent .flatpak-info is not an answer either way. The
-	// cgroup below may still be one.
-
-	if b, err := os.ReadFile(root + "/cgroup"); err == nil {
-		if id := snapFromCgroup(string(b)); id != "" {
-			return "snap:" + id,
-				"read from the peer's cgroup path, which snapd sets at launch"
-		}
-		if strings.Contains(string(b), "firejail") {
-			return "firejail:",
-				"the peer's cgroup names firejail, which does not carry an application id"
-		}
+	// An absent .flatpak-info is not an answer either way; the cgroup below
+	// may still be one. A process gone also reads absent here, and its
+	// cgroup read fails below.
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", "whether the peer is in a Flatpak sandbox could not be read: " + err.Error()
 	}
 
-	return "", "the peer is not in a sandbox this package can recognise (Flatpak, Snap or Firejail); Linux has no general answer to what a process is - see CONTRACT.md"
+	b, err = os.ReadFile(root + "/cgroup")
+	if err != nil {
+		return "", "the peer's cgroup could not be read: " + err.Error()
+	}
+	if id := snapFromCgroup(string(b)); id != "" {
+		return "snap:" + id,
+			"read from the peer's cgroup path, which snapd sets at launch"
+	}
+	if strings.Contains(string(b), "firejail") {
+		return "firejail:",
+			"the peer's cgroup names firejail, which does not carry an application id"
+	}
+
+	return "", whyNoSandbox
 }
 
 // snapFromCgroup finds snap.<instance>.<app> in a cgroup file and returns

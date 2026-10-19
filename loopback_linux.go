@@ -249,6 +249,9 @@ func bindLoopback(client, server netip.AddrPort, opts *Options) (binder, *Peer, 
 		p.Package = unknown[string]("package", why)
 	} else {
 		p.Package = attr("package", name, ProofBound, why+"; "+whyPackageAdvisory)
+		if s, ok := sandboxOf(name); ok {
+			p.Sandbox = attr("sandbox", s, ProofBound, why+"; "+whyPackageAdvisory)
+		}
 	}
 	p.note("transport: a loopback TCP connection carries no credentials; the process came from a descriptor-table scan")
 	return b, p, nil

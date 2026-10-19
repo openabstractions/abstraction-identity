@@ -3,6 +3,7 @@
 package identity
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -91,8 +92,11 @@ func stillSameImage(proc, file windows.Handle, want string) error {
 }
 
 // stillSameFile requires the file an open handle names to be at want: the
-// kernel's final path for the handle, with its \\?\ prefix removed, compared
-// case-insensitively.
+// kernel's final path for the handle, with its \\?\ prefix removed, and want
+// must name one file by file identity (samePath, which is SameFile: the
+// volume serial number and file ID). A want in another case, an 8.3 alias or
+// a path through a junction or symbolic link to that file passes; a want that
+// names another file or no file fails, as after a rename or delete.
 func stillSameFile(file windows.Handle, want string) error {
 	got, err := handleFinalPath(file)
 	if err != nil {
@@ -155,14 +159,24 @@ func longImagePath(path string) (string, error) {
 // 4.4 ms per MB, paid on a peer's first connection and every five minutes
 // after (ID-W2).
 func verifyTrust(file windows.Handle, pathW *uint16, revocation bool) (Code, Proof) {
+	return verifyTrustCaptured(file, pathW, revocation, nil)
+}
+
+func verifyTrustCaptured(file windows.Handle, pathW *uint16, revocation bool, publisherKey *string) (Code, Proof) {
+	if publisherKey != nil {
+		*publisherKey = ""
+	}
 	fi := windows.WinTrustFileInfo{
 		Size:     uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})),
 		FilePath: pathW,
 		File:     file,
 	}
-	err := winTrustCall(windows.WTD_CHOICE_FILE, unsafe.Pointer(&fi), revocation)
+	signer, err := winTrustCall(windows.WTD_CHOICE_FILE, unsafe.Pointer(&fi), revocation)
 	if err == nil {
-		return Code{Trusted: true, Status: "valid"}, ProofBound
+		if publisherKey != nil {
+			*publisherKey = signer.publisherKey
+		}
+		return Code{Trusted: true, Status: "valid", Subject: signer.subject, Issuer: signer.issuer}, ProofBound
 	}
 	status, verdict := trustVerdict(err)
 	if verdict == ProofUnsigned && inWindowsDirectory(file) {
@@ -229,7 +243,7 @@ const maxCatalogs = 64
 // verifyCatalog finds the system catalogs that list the open file's hash and
 // verifies the file as a member of each in turn, under winTrust's policy. The
 // first catalog Windows accepts gives a trusted Code with Catalog set and that
-// catalog's signer named by signerName, the reader the embedded case uses.
+// catalog's signer copied from that accepted native trust state.
 //
 // A refusal on the unsigned rung (TRUST_E_NOSIGNATURE, CRYPT_E_NOT_FOUND)
 // means that catalog does not list the file, a stale index entry, and the
@@ -314,13 +328,11 @@ func catalogMember(admin, info windows.Handle, tag *uint16, hash []byte, file wi
 		CalculatedHashSize: uint32(len(hash)),
 		CatAdmin:           admin,
 	}
-	if refusal := winTrustCall(windows.WTD_CHOICE_CATALOG, unsafe.Pointer(&member), revocation); refusal != nil {
+	signer, refusal := winTrustCall(windows.WTD_CHOICE_CATALOG, unsafe.Pointer(&member), revocation)
+	if refusal != nil {
 		return Code{}, refusal, nil
 	}
-	code = Code{Trusted: true, Catalog: true, Status: "valid, signed through a system catalog"}
-	if subject, issuer, err := signerName(catalogW, windows.CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED); err == nil {
-		code.Subject, code.Issuer = subject, issuer
-	}
+	code = Code{Trusted: true, Catalog: true, Status: "valid, signed through a system catalog", Subject: signer.subject, Issuer: signer.issuer}
 	if err := stillSameFile(catalog, catalogPath); err != nil {
 		return Code{}, nil, err
 	}
@@ -334,7 +346,7 @@ var winTrustCall = winTrust
 // winTrust is the one Authenticode policy this package applies: a
 // WinVerifyTrust call over the subject choice names (a file, or a catalog
 // member), with the trust state closed afterwards whatever the verdict.
-func winTrust(choice uint32, subject unsafe.Pointer, revocation bool) error {
+func winTrust(choice uint32, subject unsafe.Pointer, revocation bool) (trustSigner, error) {
 	data := windows.WinTrustData{
 		Size:                            uint32(unsafe.Sizeof(windows.WinTrustData{})),
 		UIChoice:                        windows.WTD_UI_NONE,
@@ -361,12 +373,100 @@ func winTrust(choice uint32, subject unsafe.Pointer, revocation bool) error {
 
 	action := windows.WINTRUST_ACTION_GENERIC_VERIFY_V2
 	err := windows.WinVerifyTrustEx(windows.InvalidHWND, &action, &data)
+	var signer trustSigner
+	if err == nil {
+		// Copy strings while the accepted provider state owns the certificate.
+		// A missing helper/state/certificate supplies no publisher evidence.
+		signer = acceptedTrustSigner(data.StateData)
+	}
 
 	// Always close the trust state, whatever the verdict, or the provider
 	// leaks per call.
 	data.StateAction = windows.WTD_STATEACTION_CLOSE
 	windows.WinVerifyTrustEx(windows.InvalidHWND, &action, &data)
-	return err
+	return signer, err
+}
+
+type trustSigner struct{ subject, issuer, publisherKey string }
+
+// acceptedTrustSigner reads the primary signer (index zero, not its timestamp
+// countersigner) from this verification's provider state. The helpers return
+// borrowed pointers. All names are copied before WTD_STATEACTION_CLOSE; no
+// certificate context or provider pointer escapes that lifetime. A catalog
+// member's provider state names the catalog signer Windows accepted.
+func acceptedTrustSigner(state windows.Handle) trustSigner {
+	if state == 0 || procWTHelperProvDataFromStateData.Find() != nil ||
+		procWTHelperGetProvSignerFromChain.Find() != nil || procWTHelperGetProvCertFromChain.Find() != nil {
+		return trustSigner{}
+	}
+	provider, _, _ := procWTHelperProvDataFromStateData.Call(uintptr(state))
+	if provider == 0 {
+		return trustSigner{}
+	}
+	signer, _, _ := procWTHelperGetProvSignerFromChain.Call(provider, 0, 0, 0)
+	if signer == 0 {
+		return trustSigner{}
+	}
+	certificate, _, _ := procWTHelperGetProvCertFromChain.Call(signer, 0)
+	if certificate == 0 {
+		return trustSigner{}
+	}
+	// Only this documented prefix of CRYPT_PROVIDER_CERT is read. The SDK
+	// places pCert after cbStruct with native pointer alignment.
+	cert := trustProviderCertificate(certificate, windows.ReadProcessMemory)
+	if cert == nil {
+		return trustSigner{}
+	}
+	return trustSigner{subject: certName(cert, 0), issuer: certName(cert, windows.CERT_NAME_ISSUER_FLAG), publisherKey: acceptedPublisherKey(cert, windows.ReadProcessMemory)}
+}
+
+// P-06 uses the full DER subject Windows accepted, rather than the display CN
+// or a renewal-fragile leaf thumbprint. Copy all borrowed bytes while WinTrust
+// still owns its provider state. A failed or unbounded read supplies no key.
+func acceptedPublisherKey(cert *windows.CertContext, read func(windows.Handle, uintptr, *byte, uintptr, *uintptr) error) string {
+	copyNative := func(address uintptr, destination unsafe.Pointer, size uintptr) bool {
+		var copied uintptr
+		return address != 0 && read(windows.CurrentProcess(), address, (*byte)(destination), size, &copied) == nil && copied == size
+	}
+	var context windows.CertContext
+	if cert == nil || !copyNative(uintptr(unsafe.Pointer(cert)), unsafe.Pointer(&context), unsafe.Sizeof(context)) {
+		return ""
+	}
+	var info windows.CertInfo
+	if !copyNative(uintptr(unsafe.Pointer(context.CertInfo)), unsafe.Pointer(&info), unsafe.Sizeof(info)) || info.Subject.Size == 0 || info.Subject.Size > 65536 {
+		return ""
+	}
+	der := make([]byte, info.Subject.Size)
+	if !copyNative(uintptr(unsafe.Pointer(info.Subject.Data)), unsafe.Pointer(&der[0]), uintptr(len(der))) {
+		return ""
+	}
+	hash := sha256.Sum256(der)
+	return "authenticode-dn-sha256:" + hex.EncodeToString(hash[:])
+}
+
+type trustProviderCert struct {
+	size uint32
+	cert *windows.CertContext
+}
+
+// trustProviderCertificate copies the fixed native prefix into Go-owned
+// storage. The returned certificate is still borrowed from the open WinTrust
+// state; acceptedTrustSigner copies its names before that state closes.
+func trustProviderCertificate(address uintptr, read func(windows.Handle, uintptr, *byte, uintptr, *uintptr) error) *windows.CertContext {
+	if address == 0 {
+		return nil
+	}
+	var prefix trustProviderCert
+	var copied uintptr
+	size := unsafe.Sizeof(prefix)
+	// CurrentProcess is a pseudo-handle and creates no handle to close.
+	if err := read(windows.CurrentProcess(), address, (*byte)(unsafe.Pointer(&prefix)), size, &copied); err != nil || copied != size {
+		return nil
+	}
+	if prefix.size < uint32(size) || prefix.cert == nil {
+		return nil
+	}
+	return prefix.cert
 }
 
 // trustVerdict words a WinVerifyTrust refusal and places it on the ladder. A
@@ -400,63 +500,6 @@ func trustVerdict(err error) (string, Proof) {
 		return "revocation status could not be checked", ProofInvalid
 	}
 	return "not trusted: " + err.Error(), ProofInvalid
-}
-
-// withSigner adds the embedded signer's subject and issuer to a Code that
-// verifyTrust accepted through the file's embedded signature. A Code accepted
-// through a system catalog already carries the catalog's signer.
-func withSigner(code Code, pathW *uint16) Code {
-	if !code.Trusted || code.Catalog {
-		return code
-	}
-	if subject, issuer, err := signerName(pathW, windows.CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED); err == nil {
-		code.Subject, code.Issuer = subject, issuer
-	}
-	return code
-}
-
-// signerName pulls the subject and issuer of the signing certificate out of
-// a PKCS#7 message: the one embedded in a signed file (content
-// CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED) or a catalog file's own
-// (CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED).
-//
-// The subject is what a person would read in a consent prompt. It is not on
-// its own an identity: certificates are issued to whatever name a CA will
-// accept, and two publishers can share a display name. The issuer is reported
-// beside it so a policy can pin both, which is the least that makes the pair
-// meaningful.
-func signerName(pathW *uint16, content uint32) (subject, issuer string, err error) {
-	var (
-		encoding, contentType, formatType uint32
-		store, msg                        windows.Handle
-	)
-	err = windows.CryptQueryObject(windows.CERT_QUERY_OBJECT_FILE, unsafe.Pointer(pathW),
-		content, windows.CERT_QUERY_FORMAT_FLAG_BINARY,
-		0, &encoding, &contentType, &formatType, &store, &msg, nil)
-	if err != nil {
-		return "", "", err
-	}
-	defer windows.CertCloseStore(store, 0)
-	defer cryptMsgClose(msg)
-
-	var n uint32
-	if err := cryptMsgGetParam(msg, cmsgSignerCertInfoParam, 0, nil, &n); err != nil {
-		return "", "", err
-	}
-	buf := make([]byte, n)
-	if err := cryptMsgGetParam(msg, cmsgSignerCertInfoParam, 0, unsafe.Pointer(&buf[0]), &n); err != nil {
-		return "", "", err
-	}
-	info := (*windows.CertInfo)(unsafe.Pointer(&buf[0]))
-
-	cert, err := windows.CertFindCertificateInStore(store, encoding, 0,
-		windows.CERT_FIND_SUBJECT_CERT, unsafe.Pointer(info), nil)
-	if err != nil {
-		return "", "", err
-	}
-	defer windows.CertFreeCertificateContext(cert)
-
-	return certName(cert, 0), certName(cert, windows.CERT_NAME_ISSUER_FLAG), nil
 }
 
 func certName(cert *windows.CertContext, flags uint32) string {

@@ -34,7 +34,7 @@ func TestAPackagedIdentityOutsideItsFolderKeepsItsPath(t *testing.T) {
 	}
 	defer l.Close()
 	// PowerShell ends a single-quoted string at ' and at U+2018..U+201B; each
-	// is doubled (the rule of abstraction-download/go/powershell.Literal,
+	// is doubled (the rule of abstraction-facade/go-core/powershell.Literal,
 	// which this module cannot import).
 	quote := func(s string) string {
 		for _, q := range []string{"'", "‘", "’", "‚", "‛"} {

@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	kernel32         = syscall.NewLazyDLL("kernel32.dll")
+	kernel32         = windows.NewLazySystemDLL("kernel32.dll")
 	createNamedPipe  = kernel32.NewProc("CreateNamedPipeW")
 	connectNamedPipe = kernel32.NewProc("ConnectNamedPipe")
 	cancelIoEx       = kernel32.NewProc("CancelIoEx")
@@ -38,12 +38,30 @@ const (
 	integrityMedium    = 0x2000
 )
 
-var errConnect = errors.New("listen: a client left before it was connected")
+var errConnect = errors.New("listen: pipe connection failed")
 
 type pipeConn struct {
 	*os.File
 	h  syscall.Handle
 	at time.Time
+}
+
+// adoptPipeFile consumes one owned overlapped handle. Go deliberately skips
+// overlapped-mode detection for cached syscall.Stdin; after stdin closes, a
+// new pipe can reuse that number. Duplicate only that alias before NewFile.
+func adoptPipeFile(h syscall.Handle, name string) (*os.File, syscall.Handle, error) {
+	if h == syscall.Stdin {
+		var duplicate windows.Handle
+		self := windows.CurrentProcess()
+		if err := windows.DuplicateHandle(self, windows.Handle(h), self, &duplicate, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+			return nil, 0, errors.Join(fmt.Errorf("listen: duplicate overlapped stdin-number pipe: %w", err), windows.CloseHandle(windows.Handle(h)))
+		}
+		if err := windows.CloseHandle(windows.Handle(h)); err != nil {
+			return nil, 0, errors.Join(fmt.Errorf("listen: retire original pipe handle: %w", err), windows.CloseHandle(duplicate))
+		}
+		h = syscall.Handle(duplicate)
+	}
+	return os.NewFile(uintptr(h), name), h, nil
 }
 
 func (c *pipeConn) Bind() (*identity.Binding, error) {
@@ -172,11 +190,21 @@ func (l *pipeListener) instance(claim uintptr) (syscall.Handle, error) {
 }
 
 func (l *pipeListener) Accept() (Conn, error) {
-	a, err := l.arm()
-	if err != nil {
-		return nil, err
+	for {
+		a, err := l.arm()
+		if err != nil {
+			return nil, err
+		}
+		conn, err := l.connected(a)
+		// ConnectNamedPipe reports ERROR_NO_DATA when the client closed
+		// before connecting. connected retired that instance and prepared
+		// its successor. Only that documented connect outcome is retried;
+		// other OS failures and Close keep their original causes.
+		if errors.Is(err, errConnect) && errors.Is(err, windows.ERROR_NO_DATA) {
+			continue
+		}
+		return conn, err
 	}
-	return l.connected(a)
 }
 
 // armedAccept is one initiated connect. arm and connected are Accept's two
@@ -268,7 +296,7 @@ func (l *pipeListener) connected(a *armedAccept) (Conn, error) {
 	l.waiting = next
 	if cerr != nil {
 		syscall.CloseHandle(h)
-		return nil, errConnect
+		return nil, fmt.Errorf("%w: %w", errConnect, cerr)
 	}
 	// os.NewFile joins the handle to the runtime poller, and a handle belongs to
 	// one completion port at a time. Nothing is pending on it now.
@@ -279,7 +307,11 @@ func (l *pipeListener) connected(a *armedAccept) (Conn, error) {
 		syscall.CloseHandle(h)
 		return nil, fmt.Errorf("listen: the connected pipe could not leave its accept port: %w", err)
 	}
-	return &pipeConn{File: os.NewFile(uintptr(h), "pipe"), h: h, at: at}, nil
+	file, adopted, err := adoptPipeFile(h, "pipe")
+	if err != nil {
+		return nil, err
+	}
+	return &pipeConn{File: file, h: adopted, at: at}, nil
 }
 
 func (l *pipeListener) Close() error {

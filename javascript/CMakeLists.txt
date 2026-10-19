@@ -13,13 +13,24 @@ add_library(oa_ipc_node MODULE addon.cpp)
 target_include_directories(oa_ipc_node PRIVATE "${NODE_INCLUDE_DIR}")
 target_compile_features(oa_ipc_node PRIVATE cxx_std_17)
 target_compile_definitions(oa_ipc_node PRIVATE NAPI_VERSION=8 NODE_GYP_MODULE_NAME=oa_ipc_node)
-target_link_libraries(oa_ipc_node PRIVATE abstraction::ipc)
+# Each blocking call runs on a thread of its own (addon.cpp dispatch).
+find_package(Threads REQUIRED)
+target_link_libraries(oa_ipc_node PRIVATE abstraction::ipc Threads::Threads)
 if(WIN32)
   set(NODE_IMPORT_LIBRARY "" CACHE FILEPATH "Official matching architecture node.lib")
   if(NOT EXISTS "${NODE_IMPORT_LIBRARY}")
     message(FATAL_ERROR "NODE_IMPORT_LIBRARY must name node.lib")
   endif()
   target_link_libraries(oa_ipc_node PRIVATE "${NODE_IMPORT_LIBRARY}")
+  if(MSVC)
+    # Official Windows node.lib imports node.exe. Resolve those imports from
+    # the already loaded host when an embedder uses a different executable name.
+    set(node_import_module "node.exe")
+    target_sources(oa_ipc_node PRIVATE windows_delay_load.cpp)
+    target_compile_definitions(oa_ipc_node PRIVATE OA_NODE_IMPORT_MODULE="${node_import_module}")
+    target_link_libraries(oa_ipc_node PRIVATE delayimp)
+    target_link_options(oa_ipc_node PRIVATE "/DELAYLOAD:${node_import_module}")
+  endif()
 elseif(APPLE)
   target_link_options(oa_ipc_node PRIVATE "-undefined" "dynamic_lookup")
 endif()
@@ -35,3 +46,5 @@ string(JSON installed_package_json SET "${package_json}" files "${files_length}"
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/package.json" "${installed_package_json}\n")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/package.json" index.js index.d.ts bun.js bun.d.ts bun-worker.js
   platform.js platform.d.ts README.md DESTINATION .)
+# The transport constants index.js and bun.js import (scripts/generate.targets).
+install(DIRECTORY js DESTINATION .)

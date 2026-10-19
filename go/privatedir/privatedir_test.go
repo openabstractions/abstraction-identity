@@ -35,6 +35,14 @@ func TestEnsure(t *testing.T) {
 	if err := Ensure(wide); !errors.Is(err, ErrNotPrivate) {
 		t.Fatalf("a folder open beyond the account: %v", err)
 	}
+	// ID-D1: Tighten gives an existing folder of this account the private
+	// descriptor, which CheckDir then accepts.
+	if err := Tighten(wide); err != nil {
+		t.Fatalf("Tighten: %v", err)
+	}
+	if err := CheckDir(wide); err != nil {
+		t.Fatalf("a tightened folder: %v", err)
+	}
 	file := filepath.Join(base, "file")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -48,5 +56,28 @@ func TestEnsure(t *testing.T) {
 	}
 	if err := Ensure(link); !errors.Is(err, ErrNotPrivate) {
 		t.Fatalf("a link to a private folder: %v", err)
+	}
+}
+
+func TestCheckFileOrdinaryAndSingleName(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private")
+	if err := Ensure(root); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "key")
+	if err := os.WriteFile(file, []byte("owned fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckFile(file); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckFile(root); err == nil {
+		t.Fatal("directory accepted as file")
+	}
+	if err := os.Link(file, filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckFile(file); err == nil {
+		t.Fatal("multi-name file accepted")
 	}
 }

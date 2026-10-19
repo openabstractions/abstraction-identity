@@ -2,6 +2,63 @@
 
 Linked from [CONTRACT.md](CONTRACT.md)'s "Reading this page."
 
+## 0.8.0 remote leaf-key admission
+
+`remote.Client` requires an admission callback and [`remote.Server`](https://openabstractions.github.io/reference.html#concept-identity.remote-server) requires
+`Admit`. Each callback checks the verified leaf SPKI against the owner's live
+paired-key policy during every TLS handshake. Missing callbacks refuse the
+transport. Existing TLS verification callbacks continue to apply. Consumers
+must supply the key policy before any shared frame can cross the connection.
+
+## 0.8.0 one file-identity owner (PT-3, 2026-10-21)
+
+- "Path identity" becomes "File identity" with rules `ID-F1`..`ID-F9` and
+  topic letter `F`. `ID-F1` keeps its id and changes title from "Which
+  question, which function" to "One owner": the package `fileid` owns file
+  identity (T12; vocabulary 9.3). Its `LocalPath` paragraph moved unchanged
+  to `ID-F3`, and its account of `SameFile`, `Within`, `Inside`,
+  `SamePathName`, `FileKey`, `PlaceKey` and `SameSubjectProgram` to `ID-F9`,
+  whose functions are now wrappers over `fileid` with unchanged answers.
+- New: `ID-F2` (the caller's view), `ID-F4` (the walk without following,
+  W0-07(s) facts 3 and 4), `ID-F5` (a `FileID` and its durability),
+  `ID-F6` (relations, `Beneath`, `CreateExclusive`, `SafeName`; W0-07(s)
+  fact 2), `ID-F7` (the three name comparisons), `ID-F8` (stored keys).
+  `ID-F9` states that the older functions follow a link to a share, the
+  defect `ID-F4` repairs (reproducer rows `win-junction-share`,
+  `win-symlink-share`).
+- Scenarios: `testdata/scenarios/fileid-*.txt`, one or more per rule, run by
+  `TestFileIDScenarios` and declared as the conformance layer `fileid`.
+- Riding PT-3 (identity corpus A2, A3, A8, A9, N1, N2): `ID-B4` (a check
+  cites its own message's evidence) and `ID-B5` (a process leaves identity
+  only pinned) name behaviour the code has; `ID-L8` (no stdlib peer pid in a
+  language client) gains a source check; `ID-V1` (verification budget per
+  account, new topic letter `V`) is new behaviour on Windows. `BindMessage`
+  is the cross-platform name of `BindXPCRequest`, which stays. `Peer.Sandbox`
+  names a Linux peer's sandbox engine, application id and Snap instance;
+  `Package` keeps its Linux value for this release.
+
+## 0.8.0 contract truth pass (W0-02, 2026-10-21)
+
+- Windows section, grant subject: outdated rule. The "package full name,
+  otherwise the signer subject and issuer" guidance is replaced by the one
+  grammar `SubjectProgram` and RIGHTS-A3 use (`msix:<family>` or the
+  normalized path; TD42; identity audit 3.1 item 1). The stated grammar is
+  the current code's (`msix:` or the path). TD42's grammar (`package:`,
+  `path:`, `hash:`, `publisher:`, with `msix:` read for one release)
+  replaces it in PT-5c, and W0-01 item 30 records the decision.
+- New "Trust domain" section: outdated rule (VISION.md:743-746 asked for it;
+  TD47; audit 3.1 item 2). It states both layers, the listener's DACL or
+  socket mode at open and the gate naming a privileged caller by its own SID
+  or uid, and cites the pipe attack test and its opt-in as the scenario.
+- Not built: the non-Go receiving `Peer`/`Binding` row leaves as an
+  outdated rule (ARCHITECTURE.md: one service implementation serves every
+  client language; audit 3.1 item 3). Each remaining line names its missing
+  artifact. The CQ-3(b) program-half classification moves unchanged to its
+  own section, "Program subject sites"; its defect stays in Not built as a
+  pointer to the TODO.md repair row.
+- README "Where it sits": outdated, now lists the units whose non-test Go
+  code imports identity (audit 3.1 item 4).
+
 ## Superseded ids
 
 - **`ID-X1`..`ID-X4`** became **`ID-M1`..`ID-M4`** (macOS), same numbering,
@@ -25,6 +82,37 @@ Linked from [CONTRACT.md](CONTRACT.md)'s "Reading this page."
 | `ID-X4` | ID-M4 | without cgo there is no code identity |
 
 ## Added
+
+- **`ID-D1` `privatedir.Tighten`, and storage's roots as callers**
+  (2026-10-20). Review of storage's `layout` (0.8.0 plan ST-1): it wrote
+  its own Windows owner-only DACL, which also admitted Administrators,
+  counted a folder Administrators own as the account's and kept an
+  inherited DACL. A folder it made failed `CheckDir` ("its DACL admits
+  S-1-5-32-544"), and the engine socket root was to move to its roots.
+  `layout` now makes its roots with `Make`, keeps them when `CheckDir`
+  passes and otherwise tightens them with the new `Tighten`, so ID-D1's
+  descriptor is the one rule for both. The account and SYSTEM are the one
+  owner-only descriptor (coordinator, ST-1 review round 3): an upgraded
+  0.4.0 data root loses its Administrators entry when `layout` tightens it,
+  and an `ID-D3` model folder keeps its own three entries. Review round 3
+  also found that `Tighten` wrote through `SetNamedSecurityInfo`, which
+  re-propagated inheritance through every name below the folder and
+  rewrote a model file's DACL through its job-store name; it now opens the
+  folder as itself and writes through that handle
+  (`TestTightenWritesOnlyTheFolder`).
+- **`ID-C7` one subject per caller** (2026-10-20, CQ-3(b)). Twenty
+  sites in thirteen modules derived their caller's account by hand, four of
+  them as verbatim `SubjectFromPeer` copies. Nine accepted a negative POSIX
+  uid as the account `-1`, four accepted a user of no known kind, and two
+  reported a Windows user with no SID under an empty account; the rest
+  refused all three. Five more sites lay outside the modules: the
+  conformance router host accepted a user of no known kind by its uid, the
+  conformance facade host and serve's OpenCode session check refused all
+  three, and serve's runtime log writer and the rights playground named
+  their own account from `Self` by hand, both naming a negative uid `-1`. `SubjectOf` and `User.Account` now own the rule, and every
+  site answers as before except that such a user is refused everywhere.
+  `subject_copies_test.go` keeps each replaced copy's transcription and
+  `testdata/subject-of/copies.txt` its recorded answers.
 
 - **`ID-F1` firmlinks and the mount-table read** (2026-10-07). Review of
   the per-mount cap: on macOS `/Users/...` and `/Applications/...` counted
@@ -178,7 +266,7 @@ Linked from [CONTRACT.md](CONTRACT.md)'s "Reading this page."
   is logged off and on again) and "a console session" (unlocking a
   Developer ID certificate) are "between logon sessions" and "a console
   logon session."
-- D65: `Ceiling()` and the word "ceiling" keep their names; identity is the
+- D65: [`Ceiling()`](https://openabstractions.github.io/reference.html#concept-identity.proof-ceiling) and the word "ceiling" keep their names; identity is the
   one contract this release where "ceiling" is not renamed to "budget"
   (inference's own `Ceiling`/`CeilingLimit` is, at D64).
 

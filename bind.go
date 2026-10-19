@@ -19,7 +19,7 @@ var (
 	ErrNoBinding = errors.New("identity: this machine cannot bind a peer to a connection")
 
 	// ErrPeerGone means there was no live process to bind to. It comes from
-	// [Bind] only. A peer that exits after it has been bound does not
+	// [Bind] or [Binding.RetainProcess]. A peer that exits after it has been bound does not
 	// invalidate the binding: "the process that opened this connection was
 	// X" stays true after X exits, and every primitive here pins the process
 	// so that no successor can take its place. Ask [Binding.Alive] when
@@ -70,6 +70,49 @@ type binder interface {
 	recheck() error
 	alive() (bool, error)
 	release() error
+}
+
+type processRetainer interface {
+	retainProcess() (binder, error)
+}
+
+func (b *bindingState) retainProcess() (binder, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
+		return nil, net.ErrClosed
+	}
+	r, ok := b.inner.(processRetainer)
+	if !ok {
+		return nil, ErrNoBinding
+	}
+	if err := b.inner.recheck(); err != nil {
+		return nil, err
+	}
+	live, err := b.inner.alive()
+	if err != nil {
+		return nil, err
+	}
+	if !live {
+		return nil, ErrPeerGone
+	}
+	pin, err := r.retainProcess()
+	if err != nil {
+		return nil, err
+	}
+	// Check the duplicate too: exit or an image contradiction during acquisition
+	// must not produce a new live lease.
+	if err = pin.recheck(); err == nil {
+		live, err = pin.alive()
+		if err == nil && !live {
+			err = ErrPeerGone
+		}
+	}
+	if err != nil {
+		pin.release()
+		return nil, err
+	}
+	return pin, nil
 }
 
 // bindingState owns the platform handle. Every Binding view reaches the same
@@ -155,6 +198,8 @@ func BindConn(c net.Conn, opts *Options) (*Binding, error) {
 //
 // A peer that has merely exited is not a contradiction and is answered
 // normally; see [Binding.Alive].
+// A retained Darwin XPC pin also keeps the historical capture after exec ends
+// that code occurrence; its Alive result is false for both exit and exec.
 func (b *Binding) Peer() (*Peer, error) {
 	if err := b.inner.recheck(); err != nil {
 		return nil, err
@@ -165,6 +210,8 @@ func (b *Binding) Peer() (*Peer, error) {
 // Alive reports whether the bound process still exists. It is a separate
 // question from whether the identity is still trustworthy, and services that
 // conflate the two end up refusing honest callers that happened to exit.
+// A retained Darwin XPC pin asks about its captured code occurrence, which ends
+// on exec as well as exit. Active lease consumers require this result.
 func (b *Binding) Alive() (bool, error) { return b.inner.alive() }
 
 // Captured returns the identity as it was at bind time without re-checking it.
@@ -203,6 +250,43 @@ func (b *Binding) Shared() *Binding {
 	return &Binding{peer: b.peer, boundAt: b.boundAt, inner: sharedBinder{b.inner}}
 }
 
+// RetainProcess returns an independently owned pin to this capture's process.
+// Acquire it while the original connection and Binding are still open. It
+// rechecks the capture and requires a live process; it never opens a process
+// by a remembered PID or retains the connection descriptor. Close the result.
+// Closing the original Binding or connection leaves this pin usable.
+//
+// Peer retains the usual historical-capture semantics after process exit;
+// a lease consumer must require Alive as well as Peer/Check and respect the
+// original EvidenceValidUntil. BoundAt and evidence deadlines are preserved.
+// Windows duplicates the process handle; Linux duplicates the pidfd and keeps
+// the existing exec guard. Darwin XPC retains the exact message's dynamic code
+// occurrence: Alive becomes false after exit or exec, while Peer remains the
+// original historical capture. The pin cannot authenticate a later message;
+// that message requires its own binding. Darwin Unix sockets return ErrNoBinding
+// because their borrowed descriptor cannot supply this independent lifetime.
+func (b *Binding) RetainProcess() (*Binding, error) {
+	if b == nil || b.inner == nil {
+		return nil, ErrNoBinding
+	}
+	r, ok := b.inner.(processRetainer)
+	if !ok {
+		return nil, ErrNoBinding
+	}
+	pin, err := r.retainProcess()
+	if err != nil {
+		return nil, err
+	}
+	return &Binding{peer: b.peer, boundAt: b.boundAt, inner: &bindingState{inner: pin}}, nil
+}
+
 type sharedBinder struct{ binder }
 
 func (sharedBinder) release() error { return nil }
+
+func (b sharedBinder) retainProcess() (binder, error) {
+	if r, ok := b.binder.(processRetainer); ok {
+		return r.retainProcess()
+	}
+	return nil, ErrNoBinding
+}

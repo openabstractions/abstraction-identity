@@ -3,12 +3,14 @@
 package trustedpath
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"unsafe"
 
+	"github.com/openabstractions/abstraction-identity/fileid"
 	"golang.org/x/sys/windows"
 )
 
@@ -37,14 +39,31 @@ const executableFolderChange = folderChange | 0x2 | 0x4 | windows.GENERIC_WRITE
 // removes it or on a folder that deletes, renames or re-permissions what it
 // holds, and neither the file nor any of those folders is a reparse point.
 // It reads attributes and security descriptors only.
-func CheckFile(path string, owners Owners) error { return check(path, owners, false) }
+func CheckFile(path string, owners Owners) error { return check(path, "", owners, false) }
 
 // CheckExecutable is CheckFile for a program that runs elevated (ID-D2's
 // executable folder): the folder holding it also refuses another
 // principal's right to add a file or a subfolder.
-func CheckExecutable(path string, owners Owners) error { return check(path, owners, true) }
+func CheckExecutable(path string, owners Owners) error { return check(path, "", owners, true) }
 
-func check(path string, owners Owners, executable bool) error {
+// CheckFileWithin is CheckFile with the owner and access rule applied from
+// root down: to the file and to each folder from root to the file's own.
+// Every folder from the volume root down is still refused when it is a
+// reparse point, and each folder above root must carry a mandatory
+// integrity label of Medium or higher (no label is Medium): a Low or
+// untrusted label would let an AppContainer, which runs at Low, rename or
+// replace it whatever its DACL says. root must be a folder above path. It
+// suits a record in a program's own state folder, whose ACL the program
+// sets, below folders other software may have granted rights on
+// (research/fast-load/PROPOSAL.md, Decision 2, amendment 1).
+func CheckFileWithin(path, root string, owners Owners) error { return check(path, root, owners, false) }
+
+// CheckFolderWithin is CheckFileWithin for the folder root itself: its owner
+// and access by the folder rule, every folder above it by the reparse-point
+// and integrity-label rules.
+func CheckFolderWithin(root string, owners Owners) error { return check(root, root, owners, false) }
+
+func check(path, root string, owners Owners, executable bool) error {
 	trusted, err := owners.sids()
 	if err != nil {
 		return err
@@ -69,17 +88,44 @@ func check(path string, owners Owners, executable bool) error {
 		}
 		return fmt.Errorf("%w: %s: folder %s: %v", ErrUntrusted, path, chain[i], err)
 	}
+	var leafFolder bool
 	for i := len(chain) - 1; i >= 0; i-- {
-		if err := kind(chain[i], i > 0); err != nil {
+		folder, err := kind(chain[i])
+		if err != nil {
+			return refuse(i, err)
+		}
+		if i > 0 && !folder {
+			return refuse(i, errors.New("it is not a folder"))
+		}
+		if i == 0 {
+			leafFolder = folder
+		}
+	}
+	limit := len(chain) - 1
+	if root != "" {
+		root = filepath.Clean(root)
+		limit = configuredRootIndex(chain, root)
+		if limit < 0 {
+			return fmt.Errorf("%w: %s is not below %s", ErrUntrusted, path, root)
+		}
+	}
+	if leafFolder != (root != "" && limit == 0) {
+		if leafFolder {
+			return refuse(0, errors.New("it is a folder"))
+		}
+		return refuse(0, errors.New("it is not a folder"))
+	}
+	for i := limit + 1; i < len(chain); i++ {
+		if err := labelAtLeastMedium(chain[i]); err != nil {
 			return refuse(i, err)
 		}
 	}
-	for i, p := range chain {
+	for i, p := range chain[:limit+1] {
 		mask := windows.ACCESS_MASK(fileChange)
 		switch {
 		case i == 1 && executable:
 			mask = executableFolderChange
-		case i > 0:
+		case i > 0 || leafFolder:
 			mask = folderChange
 		}
 		if err := access(p, mask, trusted); err != nil {
@@ -89,27 +135,41 @@ func check(path string, owners Owners, executable bool) error {
 	return nil
 }
 
-// kind refuses a reparse point, and a folder where a file belongs or the
-// reverse.
-func kind(path string, folder bool) error {
+// configuredRootIndex locates the real root among the target's ancestors.
+// Name-surrogate paths cannot introduce a different route to that root.
+func configuredRootIndex(chain []string, root string) int {
+	if !filepath.IsAbs(root) || strings.HasPrefix(root, `\\`) {
+		return -1
+	}
+	ctx := context.Background()
+	opts := fileid.Options{Links: fileid.RefuseLinks}
+	boundary, err := fileid.Resolve(ctx, fileid.Self, root, opts)
+	if err != nil || !boundary.IsDir() {
+		return -1
+	}
+	for i, path := range chain {
+		id, err := fileid.Resolve(ctx, fileid.Self, path, opts)
+		if err == nil && id.Equal(boundary) {
+			return i
+		}
+	}
+	return -1
+}
+
+// kind reports whether an ordinary path is a folder.
+func kind(path string) (bool, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	attributes, err := windows.GetFileAttributes(name)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return errors.New("it is a reparse point (a link, junction or mount point)")
+		return false, errors.New("it is a reparse point (a link, junction or mount point)")
 	}
-	if folder != (attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
-		if folder {
-			return errors.New("it is not a folder")
-		}
-		return errors.New("it is a folder")
-	}
-	return nil
+	return attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0, nil
 }
 
 // access judges one object's owner and DACL.

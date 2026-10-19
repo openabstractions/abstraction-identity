@@ -4,8 +4,12 @@
 #include <utility>
 
 namespace abstraction { namespace ipc {
-constexpr uint32_t kDefaultMaxFrame = 1024 * 1024;
-constexpr uint32_t kWireMaxFrame = 0x3FFFFFFF;
+constexpr uint32_t kDefaultMaxFrame = static_cast<uint32_t>(constants::kIpcDefaultMaxFrame);
+// The largest maximum frame a client binding accepts (IPC-F1).
+constexpr uint32_t kClientMaxFrame = static_cast<uint32_t>(constants::kIpcClientMaxFrame);
+constexpr uint32_t kWireMaxFrame = static_cast<uint32_t>(constants::kIpcWireMaxFrame);
+// The budget a call gets when its caller names none (IPC-D1).
+constexpr uint32_t kDefaultCallBudgetMs = static_cast<uint32_t>(constants::kIpcDefaultCallBudgetMs);
 constexpr uint32_t kProofRefusalHeader = 0xFFFFFFFE;
 
 class FrameError : public std::runtime_error {
@@ -17,12 +21,23 @@ public:
         : std::runtime_error(message), status(s) {}
 };
 
+class FrameTransport;
+namespace detail {
+// Internal classification retained before FrameError's public projection.
+// Only the transport may assert that no request bytes were sent.
+class PreSendFrameError final : public FrameError {
+    friend class ::abstraction::ipc::FrameTransport;
+    PreSendFrameError(const std::string& message,Status status):FrameError(message,status){}
+};
+}
+
 inline const char* status_name(Status status) {
     switch (status) {
     case Status::Ok: return "ok";
     case Status::Timeout: return "timeout";
     case Status::Disconnected: return "disconnected";
     case Status::IoError: return "io_error";
+    case Status::OpenIoError: return "open_io_error";
     case Status::InvalidArgument: return "invalid_argument";
     case Status::NoMemory: return "no_memory";
     case Status::InternalError: return "internal_error";
@@ -101,7 +116,7 @@ inline ServerExpectation select_runtime(Deadline deadline, const CancellationTok
 // EOF completion of write_frame is not an application success acknowledgement.
 class FrameTransport {
 public:
-    explicit FrameTransport(std::string endpoint, uint32_t timeout_ms = 5000,
+    explicit FrameTransport(std::string endpoint, uint32_t timeout_ms = kDefaultCallBudgetMs,
                             uint32_t max_frame = kDefaultMaxFrame)
         : endpoint_(std::move(endpoint)), timeout_(timeout_ms),
           limit_(max_frame ? max_frame : kDefaultMaxFrame) {}
@@ -110,6 +125,14 @@ public:
     FrameTransport(std::string endpoint, Deadline deadline, uint32_t max_frame = kDefaultMaxFrame)
         : endpoint_(std::move(endpoint)), timeout_(0), limit_(max_frame ? max_frame : kDefaultMaxFrame),
           deadline_(deadline), fixed_deadline_(true) {}
+
+    // One call keeps the earlier transport budget and caller absolute limit.
+    FrameTransport with_call_deadline(Deadline deadline) const {
+        auto copy = *this;
+        copy.deadline_ = std::min(operation_deadline(), deadline);
+        copy.fixed_deadline_ = true;
+        return copy;
+    }
 
     // Cancellation affects waiting for calls using this copy. It never sends
     // provider cancellation or changes the original transport.
@@ -130,39 +153,12 @@ public:
     }
     void write_frame(std::string_view frame) {
         check_size(frame.size());
-        if (sessions_ || endpoint_.compare(0, 4, "xpc:") == 0) { session_call(frame, true); return; }
-        Stream stream(endpoint_, operation_deadline(), cancellation_, server_);
-        send(stream, frame);
-        char byte;
-        size_t moved = 0;
-        if (stream.read_some(&byte, 1, moved)) {
-            if (static_cast<unsigned char>(byte) == 0xFF) {
-                unsigned char tail[3];
-                read_exact(stream, tail, sizeof tail);
-                const uint32_t word = (uint32_t(0xFF) << 24) | (uint32_t(tail[0]) << 16) |
-                    (uint32_t(tail[1]) << 8) | tail[2];
-                if (word == kProofRefusalHeader) throw_proof_refusal(stream);
-            }
-            throw FrameError("unexpected response to one-way frame");
-        }
-        if (stream.status() != Status::Disconnected)
-            throw FrameError("frame completion failed", stream.status());
+        session_call(frame, true);
     }
 
     std::string exchange_frame(std::string_view frame) {
         check_size(frame.size());
-        if (sessions_ || endpoint_.compare(0, 4, "xpc:") == 0) return session_call(frame, false);
-        Stream stream(endpoint_, operation_deadline(), cancellation_, server_);
-        send(stream, frame);
-        unsigned char header[4];
-        read_exact(stream, header, sizeof header);
-        const uint32_t size = (uint32_t(header[0]) << 24) |
-            (uint32_t(header[1]) << 16) | (uint32_t(header[2]) << 8) | header[3];
-        if (size == kProofRefusalHeader) throw_proof_refusal(stream);
-        check_size(size); // reject before allocation
-        std::string reply(size, '\0');
-        read_exact(stream, reply.data(), reply.size());
-        return reply;
+        return session_call(frame, false);
     }
 
 private:
@@ -176,35 +172,6 @@ private:
         if (size > limit_ || size > kWireMaxFrame)
             throw FrameError("frame too large", Status::InvalidArgument);
     }
-    static void throw_proof_refusal(Stream& stream) {
-        unsigned char tokens[2];
-        read_exact(stream, tokens, sizeof tokens);
-        static const char* names[] = {"", "user", "process", "path", "package", "code"};
-        static const char* proofs[] = {"", "claimed", "invalid", "unsigned", "unmet", "pid", "bound", "kernel", "signed"};
-        if (tokens[0] > 5 || tokens[1] > 8 || (tokens[0] == 0) != (tokens[1] == 0))
-            throw FrameError("malformed caller-proof refusal");
-        if (tokens[0] == 0) throw FrameError("receiver refused caller proof", Status::ProofUnavailable);
-        throw FrameError(std::string("receiver refused caller proof: ") + names[tokens[0]] +
-            " requires " + proofs[tokens[1]], Status::ProofUnavailable);
-    }
-    void send(Stream& stream, std::string_view frame) const {
-        const auto size = static_cast<uint32_t>(frame.size());
-        const char header[4] = {char(size >> 24), char(size >> 16), char(size >> 8), char(size)};
-        if (!stream.valid()) throw FrameError(connect_failure(endpoint_, stream.status()), stream.status());
-        if (!stream.write_all(std::string_view(header, 4)) || !stream.write_all(frame))
-            throw FrameError("frame write to " + endpoint_ + " failed (" + status_name(stream.status()) +
-                "); the request may have reached the runtime", stream.status());
-    }
-    static void read_exact(Stream& stream, void* bytes, size_t count) {
-        auto* next = static_cast<char*>(bytes);
-        while (count) {
-            size_t moved = 0;
-            if (!stream.read_some(next, count, moved))
-                throw FrameError("truncated frame or read failure", stream.status());
-            next += moved;
-            count -= moved;
-        }
-    }
     std::string endpoint_;
     uint32_t timeout_, limit_;
     Deadline deadline_{};
@@ -216,8 +183,13 @@ private:
     std::string session_call(std::string_view frame, bool one_way) const {
         if (endpoint_.compare(0, 4, "xpc:") == 0 && !(oa_ipc_features() & OA_IPC_FEATURE_XPC))
             throw FrameError("native XPC transport unavailable", Status::ProofUnavailable);
-        const auto now = Clock::now();
+        const bool single = !sessions_ && endpoint_.compare(0, 4, "xpc:") != 0;
+        if (single && !(oa_ipc_features() & OA_IPC_FEATURE_SINGLE_EXCHANGE))
+            throw FrameError("native single-exchange transport unavailable", Status::ProofUnavailable);
+        const bool report_open = endpoint_.compare(0, 4, "xpc:") != 0 &&
+            (oa_ipc_features() & OA_IPC_FEATURE_OPEN_FAILURE) != 0;
         const auto deadline = operation_deadline();
+        const auto now = Clock::now();
         auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
         const auto ms = left <= 0 ? 0 : static_cast<uint32_t>(std::min<decltype(left)>(left, UINT32_MAX));
         oa_ipc_server_expectation expected{};
@@ -228,13 +200,15 @@ private:
         size_t sent = 0;
         const auto status = static_cast<Status>(oa_ipc_session_call(endpoint_.data(), endpoint_.size(), ms,
             cancellation_.handle_.get(), server_ ? &expected : nullptr, frame.data(), frame.size(), limit_,
-            one_way ? OA_IPC_CALL_ONE_WAY : 0, &raw, &sent));
+            (one_way ? OA_IPC_CALL_ONE_WAY : 0) | (single ? OA_IPC_CALL_SINGLE_EXCHANGE : 0) |
+            (report_open ? OA_IPC_CALL_REPORT_OPEN_FAILURE : 0), &raw, &sent));
         std::unique_ptr<oa_ipc_reply, decltype(&oa_ipc_reply_release)> reply(raw, oa_ipc_reply_release);
         if (status != Status::Ok) {
             if (status == Status::InvalidArgument) throw FrameError("frame too large", status);
             if (status == Status::ProofUnavailable)
                 throw FrameError("frame proof unavailable: receiver caller-proof refusal or local proof facility unavailable", status);
-            if (sent == 0) throw FrameError(connect_failure(endpoint_, status), status);
+            if (!frame.empty() && report_open && status==Status::OpenIoError)
+                throw detail::PreSendFrameError(connect_failure(endpoint_,status),status);
             throw FrameError("frame exchange with " + endpoint_ + " failed (" + status_name(status) +
                 "); the request may have reached the runtime", status);
         }

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	identity "github.com/openabstractions/abstraction-identity"
+	"github.com/openabstractions/abstraction-identity/go/privatedir"
+	"golang.org/x/sys/unix"
 )
 
 type unixConn struct {
@@ -55,12 +57,26 @@ func Listen(path string) (Listener, error) {
 	if listener, handled, err := listenMessageEndpoint(path); handled {
 		return listener, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if os.Getuid() != os.Geteuid() {
+		return nil, fmt.Errorf("listen: mixed real/effective user identity")
+	}
+	if err := privatedir.Ensure(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	fd, err := unix.Open(path+".lock", unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, err
+	}
+	lock := os.NewFile(uintptr(fd), path+".lock")
+	info, err := lock.Stat()
+	if err != nil {
+		lock.Close()
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || int(stat.Uid) != os.Geteuid() || stat.Nlink != 1 {
+		lock.Close()
+		return nil, fmt.Errorf("listen: lock is not an owned ordinary private file")
 	}
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		lock.Close()
@@ -96,6 +112,10 @@ func clearStale(path string) error {
 	}
 	if err != nil {
 		return err
+	}
+	stat, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return fmt.Errorf("%w: socket owner differs from this account", ErrTaken)
 	}
 	if fi.Mode().Type()&os.ModeSocket == 0 {
 		return fmt.Errorf("%w: %s is not a socket, and a listener does not remove it", ErrTaken, path)

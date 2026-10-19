@@ -4,6 +4,7 @@ package identity
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -14,15 +15,55 @@ import (
 // FILE_SHARE_WRITE: no one can open the file for writing during the
 // verification, and a file someone already holds open for writing is refused
 // at the open with a sharing violation. A running image has the same property
-// from its mapped image section. FILE_SHARE_DELETE stays, so a rename or
-// delete is still allowed and stillSameFile sees it.
+// from its mapped image section. VerifyFile's own handle keeps
+// FILE_SHARE_DELETE, and stillSameFile sees a rename or delete. The private
+// interpreter reader uses the same share mode and verifies its original
+// handle across a rename.
 const verifyFileShare = windows.FILE_SHARE_READ | windows.FILE_SHARE_DELETE
 
+// openSignatureFile permits an updater's rename while excluding writers.
+// openStampedWith owns local path, regular file and stamp admission.
+func openSignatureFile(path string) (*os.File, error) {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	h, err := windows.CreateFile(p, windows.GENERIC_READ, verifyFileShare,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(h), path), nil
+}
+
+// verifyOpenFile verifies the signature opener's actual held regular file.
+// path is its already-observed final name, a native policy hint. The file may
+// move during verification; all signature/resource facts come from its handle
+// and the accepted native trust state. The exported path API retains its own
+// final same-file check.
+func verifyOpenFile(f *os.File, path string, opts *Options) (Code, Proof, error) {
+	if !localDrivePath(path) || !localDrive(path, driveType) {
+		return Code{}, ProofNone, ErrNotLocalFile
+	}
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return Code{}, ProofNone, ErrNotLocalFile
+	}
+	return verifyHeld(windows.Handle(f.Fd()), p, opts.checkRevocation())
+}
+
 // verifyPathFile runs the same Authenticode policy and signer read verifyImage
-// uses. WinVerifyTrust reads the handle this function holds open; the signer
-// read goes by path, so afterwards the handle's final path must still be the
-// verified path (stillSameFile), as it must for a peer's image.
+// uses. WinVerifyTrust reads the handle this function holds open and its
+// accepted provider state supplies the signer. This path API also requires
+// its original path to keep naming the held file (stillSameFile).
 func verifyPathFile(path string, opts *Options) (Code, Proof, error) {
+	return verifyPathFileCaptured(path, opts, nil)
+}
+
+func verifyPathFileCaptured(path string, opts *Options, publisherKey *string) (Code, Proof, error) {
+	if publisherKey != nil {
+		*publisherKey = ""
+	}
 	if !localDrivePath(path) || !localDrive(path, driveType) {
 		return Code{}, ProofNone, ErrNotLocalFile
 	}
@@ -49,11 +90,17 @@ func verifyPathFile(path string, opts *Options) (Code, Proof, error) {
 		return Code{}, ProofNone, ErrNotLocalFile
 	}
 
-	code, verdict, err := verifyHeld(file, pathW, opts.checkRevocation())
+	code, verdict, err := verifyHeldCaptured(file, pathW, opts.checkRevocation(), publisherKey)
 	if err != nil {
+		if publisherKey != nil {
+			*publisherKey = ""
+		}
 		return Code{}, ProofNone, fmt.Errorf("verification abandoned: %w", err)
 	}
 	if err := stillSameFile(file, long); err != nil {
+		if publisherKey != nil {
+			*publisherKey = ""
+		}
 		return Code{}, ProofNone, fmt.Errorf("verification abandoned: %w", err)
 	}
 	return code, verdict, nil

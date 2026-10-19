@@ -14,6 +14,55 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestTrustProviderCertificatePrefixLayout(t *testing.T) {
+	var prefix trustProviderCert
+	word := unsafe.Sizeof(uintptr(0))
+	if unsafe.Offsetof(prefix.cert) != word || unsafe.Sizeof(prefix) != 2*word {
+		t.Fatalf("native prefix: certificate offset %d, size %d, pointer size %d", unsafe.Offsetof(prefix.cert), unsafe.Sizeof(prefix), word)
+	}
+}
+
+func TestTrustProviderCertificatePrefix(t *testing.T) {
+	certificate := &windows.CertContext{}
+	size := unsafe.Sizeof(trustProviderCert{})
+	for _, test := range []struct {
+		name    string
+		address uintptr
+		prefix  trustProviderCert
+		copied  uintptr
+		err     error
+		want    *windows.CertContext
+	}{
+		{"exact", 1, trustProviderCert{uint32(size), certificate}, size, nil, certificate},
+		{"larger native structure", 1, trustProviderCert{uint32(size + 16), certificate}, size, nil, certificate},
+		{"missing address", 0, trustProviderCert{}, 0, nil, nil},
+		{"read failure", 1, trustProviderCert{uint32(size), certificate}, size, errors.New("fixture read failed"), nil},
+		{"short copy", 1, trustProviderCert{uint32(size), certificate}, size - 1, nil, nil},
+		{"overreported copy", 1, trustProviderCert{uint32(size), certificate}, size + 1, nil, nil},
+		{"short native structure", 1, trustProviderCert{uint32(size - 1), certificate}, size, nil, nil},
+		{"missing certificate", 1, trustProviderCert{uint32(size), nil}, size, nil, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			read := func(process windows.Handle, address uintptr, buffer *byte, count uintptr, copied *uintptr) error {
+				calls++
+				if process != windows.CurrentProcess() || address != test.address || count != size {
+					t.Fatalf("read scope: process %x, address %x, count %d", process, address, count)
+				}
+				*(*trustProviderCert)(unsafe.Pointer(buffer)) = test.prefix
+				*copied = test.copied
+				return test.err
+			}
+			if got := trustProviderCertificate(test.address, read); got != test.want {
+				t.Fatalf("certificate %p, want %p", got, test.want)
+			}
+			if (calls == 0) != (test.address == 0) {
+				t.Fatalf("read calls %d for address %x", calls, test.address)
+			}
+		})
+	}
+}
+
 // TestVerifyFileOpensOnlyLocalDrivePaths asserts ID-W4's path rule: a UNC,
 // device, relative or unclean path is refused before any open.
 func TestVerifyFileOpensOnlyLocalDrivePaths(t *testing.T) {
@@ -65,7 +114,7 @@ func TestVerifyFileRefusesRemoteDrives(t *testing.T) {
 }
 
 // TestStillSameFileFollowsTheHandle asserts the same-file check VerifyFile
-// runs after its path-based signer read: the handle's final path must still
+// runs after its native verification: the handle's final path must still
 // be the verified path, and a rename away is refused.
 func TestStillSameFileFollowsTheHandle(t *testing.T) {
 	dir := t.TempDir()
@@ -162,7 +211,7 @@ func recordTrust(t *testing.T, catalogAnswer error) *[]trustCall {
 	t.Helper()
 	calls := &[]trustCall{}
 	previous := winTrustCall
-	winTrustCall = func(choice uint32, subject unsafe.Pointer, revocation bool) error {
+	winTrustCall = func(choice uint32, subject unsafe.Pointer, revocation bool) (trustSigner, error) {
 		c := trustCall{choice: choice}
 		switch choice {
 		case windows.WTD_CHOICE_FILE:
@@ -172,7 +221,7 @@ func recordTrust(t *testing.T, catalogAnswer error) *[]trustCall {
 		}
 		*calls = append(*calls, c)
 		if choice == windows.WTD_CHOICE_CATALOG && catalogAnswer != nil {
-			return catalogAnswer
+			return trustSigner{}, catalogAnswer
 		}
 		return previous(choice, subject, revocation)
 	}
@@ -310,4 +359,69 @@ func TestVerifyFileUnsignedAndMissing(t *testing.T) {
 	if _, proof, err := VerifyFile(exe+".missing", nil); err == nil || proof != ProofNone {
 		t.Fatalf("a missing file must be an error: %v %v", proof, err)
 	}
+}
+
+// Independent path-reader oracle used only by preexisting catalog tests.
+var (
+	procCryptMsgGetParam = windows.NewLazySystemDLL("crypt32.dll").NewProc("CryptMsgGetParam")
+	procCryptMsgClose    = windows.NewLazySystemDLL("crypt32.dll").NewProc("CryptMsgClose")
+)
+
+const cmsgSignerCertInfoParam = 7
+
+// signerName pulls the subject and issuer of the signing certificate out of
+// a PKCS#7 message: the one embedded in a signed file (content
+// CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED) or a catalog file's own
+// (CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED).
+//
+// The subject is what a person would read in a consent prompt. It is not on
+// its own an identity: certificates are issued to whatever name a CA will
+// accept, and two publishers can share a display name. The issuer is reported
+// beside it so a policy can pin both, which is the least that makes the pair
+// meaningful.
+func signerName(pathW *uint16, content uint32) (subject, issuer string, err error) {
+	var (
+		encoding, contentType, formatType uint32
+		store, msg                        windows.Handle
+	)
+	err = windows.CryptQueryObject(windows.CERT_QUERY_OBJECT_FILE, unsafe.Pointer(pathW),
+		content, windows.CERT_QUERY_FORMAT_FLAG_BINARY,
+		0, &encoding, &contentType, &formatType, &store, &msg, nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer windows.CertCloseStore(store, 0)
+	defer cryptMsgClose(msg)
+
+	var n uint32
+	if err := cryptMsgGetParam(msg, cmsgSignerCertInfoParam, 0, nil, &n); err != nil {
+		return "", "", err
+	}
+	buf := make([]byte, n)
+	if err := cryptMsgGetParam(msg, cmsgSignerCertInfoParam, 0, unsafe.Pointer(&buf[0]), &n); err != nil {
+		return "", "", err
+	}
+	info := (*windows.CertInfo)(unsafe.Pointer(&buf[0]))
+
+	cert, err := windows.CertFindCertificateInStore(store, encoding, 0,
+		windows.CERT_FIND_SUBJECT_CERT, unsafe.Pointer(info), nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer windows.CertFreeCertificateContext(cert)
+
+	return certName(cert, 0), certName(cert, windows.CERT_NAME_ISSUER_FLAG), nil
+}
+
+func cryptMsgGetParam(msg windows.Handle, param, index uint32, data unsafe.Pointer, size *uint32) error {
+	r1, _, e1 := syscall.SyscallN(procCryptMsgGetParam.Addr(), uintptr(msg), uintptr(param),
+		uintptr(index), uintptr(data), uintptr(unsafe.Pointer(size)))
+	if r1 == 0 {
+		return errnoOrEINVAL(e1)
+	}
+	return nil
+}
+
+func cryptMsgClose(msg windows.Handle) {
+	syscall.SyscallN(procCryptMsgClose.Addr(), uintptr(msg))
 }

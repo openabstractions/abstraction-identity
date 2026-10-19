@@ -42,25 +42,37 @@ func TestServerExpectationBeforePayload(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer listener.Close()
-			received := make(chan int, 1)
+			type serverResult struct {
+				bytes     int
+				acceptErr error
+			}
+			received := make(chan serverResult, 1)
 			go func() {
 				conn, err := listener.Accept()
 				if err != nil {
-					received <- 0
+					received <- serverResult{acceptErr: err}
 					return
 				}
 				defer conn.Close()
 				counter := &serverByteCounter{Reader: conn}
 				b, err := readFrame(counter, 1024)
+				received <- serverResult{bytes: counter.n}
 				if err != nil {
-					received <- counter.n
 					return
 				}
-				received <- counter.n
 				_ = writeFrame(conn, b, 1024)
 				var end [1]byte
 				conn.Read(end[:])
 			}()
+			if runtime.GOOS == "windows" {
+				// A refused client can close before the pipe's first Accept.
+				// Wait for the kernel connect so this fixture observes its bytes.
+				pending, ok := listener.(interface{ waitForPendingAccept(*testing.T) })
+				if !ok {
+					t.Fatal("expected a Windows pipe listener")
+				}
+				pending.waitForPendingAccept(t)
+			}
 			expectation := currentServerExpectation(t)
 			switch mode {
 			case "wrong-program":
@@ -92,8 +104,11 @@ func TestServerExpectationBeforePayload(t *testing.T) {
 			}
 			select {
 			case got := <-received:
-				if err != nil && got != 0 {
-					t.Fatalf("refused server received %d bytes", got)
+				if got.acceptErr != nil {
+					t.Fatalf("server accept: %v", got.acceptErr)
+				}
+				if err != nil && got.bytes != 0 {
+					t.Fatalf("refused server received %d bytes", got.bytes)
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("server not released")

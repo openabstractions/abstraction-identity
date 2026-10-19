@@ -1,5 +1,6 @@
 #include <node_api.h>
 #include <abstraction/ipc/client.h>
+#include <abstraction/ipc/constants/rec.h>
 #ifdef _WIN32
 #include "path_identity_windows.h"
 #endif
@@ -7,24 +8,25 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
 using Clock=std::chrono::steady_clock;
-constexpr size_t frame_bound=2*1024*1024;
+// The largest maximum frame a client binding accepts (identity.thrift, IPC-F1).
+constexpr size_t frame_bound=static_cast<size_t>(abstraction::ipc::constants::kIpcClientMaxFrame);
 constexpr napi_type_tag token_tag{0x17ef51e23509bad1ULL,0xbe22908c1635cf98ULL};
 std::atomic<unsigned> active{0};
 struct Signal {
   oa_ipc_cancellation* value=nullptr;
-  // Accessed only on the owning JavaScript thread. Workers only use value.
-  std::vector<napi_async_work> queued;
   ~Signal(){oa_ipc_cancellation_release(value);}
 };
 using Token=std::shared_ptr<Signal>;
 struct Work {
-  napi_async_work work=nullptr;
   napi_deferred deferred=nullptr;
   std::string endpoint,principal,program;
   uint32_t principal_kind=0;
@@ -37,6 +39,109 @@ struct Work {
   const char* stage="open";
 };
 void checked(napi_status s){if(s!=napi_ok)throw s;}
+// Each blocking native operation runs on a thread of its own, never on the
+// runtime's shared worker pool (libuv's four threads by default): a waiting
+// call such as a 30 s observe or wait would hold a pool thread, and a short
+// call queued behind four of them reached the native library after its own
+// deadline and failed before its exchange (an adopter's Node host,
+// 2026-11-01: title calls refused at stage "open"). A call's deadline counts
+// from the moment it is made. The 32-call cap bounds the threads.
+//
+// A Flight is one such call. Its result returns to the JavaScript thread
+// through a thread-safe function. Its environment may end first: a Worker is
+// terminated, a renderer closes. Node then frees the thread-safe function
+// while the call's thread still runs, and a later call into it reads freed
+// memory (review 2026-11-01: exit 139 when a Worker with four calls in flight
+// was terminated). So each flight registers an environment cleanup hook after
+// its thread-safe function; Node runs cleanup hooks in reverse order of
+// registration, so the hook runs while the function is still alive. The hook
+// marks the flight closing, signals its cancellation and waits for its thread.
+// The thread touches the thread-safe function only under the flight's lock
+// and only while the flight is not closing. Ownership of the job is decided
+// under that lock: posted (delivery, or the function's teardown, frees it) or
+// abandoned (the hook frees it).
+struct Completion {
+  void (*complete)(napi_env,napi_status,void*);
+  void (*drop)(void*);
+};
+struct Flight {
+  std::mutex m;
+  std::condition_variable cv;
+  enum {Running,Posted,Abandoned} state=Running;
+  bool closing=false;
+  napi_threadsafe_function done=nullptr;
+  void* job=nullptr;
+  const Completion* completion=nullptr;
+  // The call's cancellation: the caller's token, or one of its own.
+  std::shared_ptr<Signal> signal;
+  // The cleanup hook's registered argument while the hook is registered.
+  std::shared_ptr<Flight>* hook=nullptr;
+};
+using FlightRef=std::shared_ptr<Flight>;
+void flight_hook(void* arg){
+  std::unique_ptr<FlightRef> ref(static_cast<FlightRef*>(arg));
+  FlightRef f=*ref;
+  std::unique_lock<std::mutex> lock(f->m);
+  f->closing=true;f->hook=nullptr;
+  if(f->state==Flight::Running){
+    oa_ipc_cancellation_signal(f->signal->value);
+    f->cv.wait(lock,[&]{return f->state!=Flight::Running;});
+  }
+  // A posted job is freed by delivery, which the function's teardown makes
+  // with no environment.
+  if(f->state==Flight::Abandoned){lock.unlock();f->completion->drop(f->job);}
+}
+void deliver(napi_env env,napi_value,void*,void* data){
+  std::unique_ptr<FlightRef> ref(static_cast<FlightRef*>(data));
+  FlightRef f=*ref;
+  if(env==nullptr){f->completion->drop(f->job);return;}
+  FlightRef* hook=nullptr;
+  {std::lock_guard<std::mutex> lock(f->m);hook=f->hook;f->hook=nullptr;}
+  if(hook){napi_remove_env_cleanup_hook(env,flight_hook,hook);delete hook;}
+  f->completion->complete(env,napi_ok,f->job);
+}
+void finish(const FlightRef& f){
+  std::lock_guard<std::mutex> lock(f->m);
+  if(!f->closing){
+    auto ref=std::make_unique<FlightRef>(f);
+    if(napi_call_threadsafe_function(f->done,ref.get(),napi_tsfn_nonblocking)==napi_ok){
+      ref.release();f->state=Flight::Posted;
+    }else{
+      f->state=Flight::Abandoned;
+    }
+    napi_release_threadsafe_function(f->done,napi_tsfn_release);
+  }else{
+    f->state=Flight::Abandoned;
+  }
+  f->cv.notify_all();
+}
+Token own_signal(){
+  auto signal=std::make_shared<Signal>();
+  if(oa_ipc_cancellation_create(&signal->value)!=OA_IPC_OK)throw napi_generic_failure;
+  return signal;
+}
+template<class Job>
+void dispatch(napi_env env,const char* label,const Completion& completion,Job* job,void (*run)(Job*)){
+  if(!job->signal)job->signal=own_signal();
+  auto f=std::make_shared<Flight>();
+  f->job=job;f->completion=&completion;f->signal=job->signal;
+  napi_value name;checked(napi_create_string_utf8(env,label,NAPI_AUTO_LENGTH,&name));
+  checked(napi_create_threadsafe_function(env,nullptr,nullptr,name,0,1,nullptr,nullptr,nullptr,deliver,&f->done));
+  auto hook=std::make_unique<FlightRef>(f);
+  if(napi_add_env_cleanup_hook(env,flight_hook,hook.get())!=napi_ok){
+    napi_release_threadsafe_function(f->done,napi_tsfn_abort);
+    throw napi_generic_failure;
+  }
+  f->hook=hook.get();
+  try{
+    std::thread([f,job,run]{run(job);finish(f);}).detach();
+  }catch(...){
+    napi_remove_env_cleanup_hook(env,flight_hook,hook.get());
+    napi_release_threadsafe_function(f->done,napi_tsfn_abort);
+    throw;
+  }
+  hook.release();
+}
 napi_value fail(napi_env env,const char* message){napi_throw_error(env,nullptr,message);return nullptr;}
 Token token(napi_env env,napi_value value){
   bool tagged=false;checked(napi_check_object_type_tag(env,value,&token_tag,&tagged));
@@ -59,7 +164,6 @@ napi_value cancel(napi_env env,napi_callback_info info){try{
   if(n!=1)throw napi_invalid_arg;
   auto signal=token(env,args[0]);
   oa_ipc_cancellation_signal(signal->value);
-  for(auto work:signal->queued)napi_cancel_async_work(env,work);
   napi_value result;checked(napi_get_undefined(env,&result));return result;
 }catch(...){return fail(env,"invalid cancellation token");}}
 napi_value bootstrap(napi_env env,napi_callback_info){try{
@@ -72,12 +176,8 @@ napi_value bootstrap(napi_env env,napi_callback_info){try{
     napi_value result;checked(napi_create_string_utf8(env,bytes.data(),size-1,&result));return result;
   }return fail(env,"native bootstrap changed repeatedly");
 }catch(...){return fail(env,"native bootstrap failed");}}
-bool read_exact(Work& w,oa_ipc_connection* connection,unsigned char* out,size_t size){
-  size_t got=0;
-  while(got<size){size_t n=0;w.status=oa_ipc_read(connection,out+got,size-got,&n);
-    if(w.status!=OA_IPC_OK){w.transferred=got;return false;}
-    if(n==0||n>size-got){w.status=OA_IPC_INTERNAL_ERROR;return false;}got+=n;
-  }return true;
+napi_value features(napi_env env,napi_callback_info){
+  napi_value result;if(napi_create_uint32(env,oa_ipc_features(),&result)!=napi_ok)return nullptr;return result;
 }
 void execute(napi_env,void* p){
   auto& w=*static_cast<Work*>(p);
@@ -88,47 +188,29 @@ void execute(napi_env,void* p){
     if(w.endpoint.compare(0,4,"xpc:")==0 && !(oa_ipc_features() & OA_IPC_FEATURE_XPC)){
       w.status=OA_IPC_PROOF_UNAVAILABLE;return;
     }
-    if(w.sessions || w.endpoint.compare(0,4,"xpc:")==0){
-      // One call through the shared library's session pool (FRAMING.md "Sessions").
+    const bool single=!w.sessions&&w.endpoint.compare(0,4,"xpc:")!=0;
+    const bool report_open=w.endpoint.compare(0,4,"xpc:")!=0&&(oa_ipc_features()&OA_IPC_FEATURE_OPEN_FAILURE);
+    if(single && !(oa_ipc_features() & OA_IPC_FEATURE_SINGLE_EXCHANGE)){
+      w.status=OA_IPC_PROOF_UNAVAILABLE;return;
+    }
+    {
+      // The shared owner selects fresh single exchange, session pooling or XPC.
       const oa_ipc_server_expectation expected{sizeof(oa_ipc_server_expectation),1,w.principal_kind,0,
         w.principal.data(),w.principal.size(),w.program.data(),w.program.size()};
       oa_ipc_reply* answer=nullptr;
       w.stage="exchange";
       w.status=oa_ipc_session_call(w.endpoint.data(),w.endpoint.size(),static_cast<uint32_t>(ms),w.signal?w.signal->value:nullptr,
-        w.principal_kind?&expected:nullptr,w.request.data()+4,w.request.size()-4,static_cast<uint32_t>(w.limit),
-        w.reply?0:OA_IPC_CALL_ONE_WAY,&answer,&w.transferred);
+        w.principal_kind?&expected:nullptr,w.request.data(),w.request.size(),static_cast<uint32_t>(w.limit),
+        (w.reply?0:OA_IPC_CALL_ONE_WAY)|(single?OA_IPC_CALL_SINGLE_EXCHANGE:0)|(report_open?OA_IPC_CALL_REPORT_OPEN_FAILURE:0),&answer,&w.transferred);
       std::unique_ptr<oa_ipc_reply,decltype(&oa_ipc_reply_release)> owned(answer,oa_ipc_reply_release);
       if(w.status==OA_IPC_OK&&w.reply){size_t n=0;const auto* data=oa_ipc_reply_data(answer,&n);if(n)w.response.assign(data,data+n);}
       if(w.status==OA_IPC_INVALID_ARGUMENT)w.stage="frame_limit";
       return;
     }
-    oa_ipc_connection* raw=nullptr;
-    if(w.principal_kind){
-      const oa_ipc_server_expectation expected{sizeof(oa_ipc_server_expectation),1,w.principal_kind,0,
-        w.principal.data(),w.principal.size(),w.program.data(),w.program.size()};
-      w.status=oa_ipc_open_verified(w.endpoint.data(),w.endpoint.size(),static_cast<uint32_t>(ms),w.signal?w.signal->value:nullptr,&expected,&raw);
-    }else w.status=oa_ipc_open_cancelable(w.endpoint.data(),w.endpoint.size(),static_cast<uint32_t>(ms),w.signal?w.signal->value:nullptr,&raw);
-    if(w.status!=OA_IPC_OK)return;
-    std::unique_ptr<oa_ipc_connection,decltype(&oa_ipc_close)> connection(raw,oa_ipc_close);
-    w.stage="write";
-    w.status=oa_ipc_write(raw,w.request.data(),w.request.size(),&w.transferred);
-    if(w.status!=OA_IPC_OK)return;
-    if(w.transferred!=w.request.size()){w.status=OA_IPC_INTERNAL_ERROR;return;}
-    w.stage="read";w.transferred=0;
-    if(!w.reply){unsigned char byte;size_t n=0;w.status=oa_ipc_read(raw,&byte,1,&n);
-      if(w.status==OA_IPC_DISCONNECTED)w.status=OA_IPC_OK;
-      else if(w.status==OA_IPC_OK)w.status=OA_IPC_IO_ERROR;
-      return;
-    }
-    unsigned char prefix[4];if(!read_exact(w,raw,prefix,4))return;
-    size_t size=(size_t(prefix[0])<<24)|(size_t(prefix[1])<<16)|(size_t(prefix[2])<<8)|prefix[3];
-    if(size>w.limit){w.status=OA_IPC_INVALID_ARGUMENT;w.stage="frame_limit";return;}
-    w.response.resize(size);read_exact(w,raw,w.response.data(),size);
   }catch(const std::bad_alloc&){w.status=OA_IPC_NO_MEMORY;}catch(...){w.status=OA_IPC_INTERNAL_ERROR;}
 }
 void complete(napi_env env,napi_status status,void* p){
   std::unique_ptr<Work> w(static_cast<Work*>(p));
-  if(w->signal){auto& q=w->signal->queued;q.erase(std::remove(q.begin(),q.end(),w->work),q.end());}
   active.fetch_sub(1);
   if(status!=napi_ok&&w->status==OA_IPC_OK)w->status=OA_IPC_CANCELLED;
   napi_value result;
@@ -144,8 +226,10 @@ void complete(napi_env env,napi_status status,void* p){
       napi_reject_deferred(env,w->deferred,result);
     }
   }
-  napi_delete_async_work(env,w->work);
 }
+void run_call(Work* w){execute(nullptr,w);}
+void drop_call(void* p){delete static_cast<Work*>(p);active.fetch_sub(1);}
+const Completion call_completion{complete,drop_call};
 napi_value call(napi_env env,napi_callback_info info){
   bool counted=false;
   std::unique_ptr<Work> w;
@@ -180,36 +264,44 @@ napi_value call(napi_env env,napi_callback_info info){
         w->principal=text("principal");w->program=text("program");
       }
     }
-    w->request.resize(bytes+4);for(int i=0;i<4;++i)w->request[i]=static_cast<unsigned char>(bytes>>(24-8*i));
-    if(bytes)std::copy_n(static_cast<unsigned char*>(data),bytes,w->request.begin()+4);
+    if(bytes)w->request.assign(static_cast<unsigned char*>(data),static_cast<unsigned char*>(data)+bytes);
     unsigned previous=active.fetch_add(1);counted=true;
     if(previous>=32)throw napi_queue_full;
-    napi_value promise,name;checked(napi_create_promise(env,&w->deferred,&promise));checked(napi_create_string_utf8(env,"oa.ipc",NAPI_AUTO_LENGTH,&name));
-    checked(napi_create_async_work(env,nullptr,name,execute,complete,w.get(),&w->work));
-    if(w->signal)w->signal->queued.push_back(w->work);
-    checked(napi_queue_async_work(env,w->work));w.release();return promise;
+    napi_value promise;checked(napi_create_promise(env,&w->deferred,&promise));
+    dispatch(env,"oa.ipc",call_completion,w.get(),run_call);w.release();return promise;
   }catch(...){
-    if(w&&w->work){
-      if(w->signal){auto& q=w->signal->queued;q.erase(std::remove(q.begin(),q.end(),w->work),q.end());}
-      napi_delete_async_work(env,w->work);
-    }
     if(counted)active.fetch_sub(1);return fail(env,"invalid or over-capacity IPC call");
   }
 }
 // Installed runtime selection through the shared selector, off the JavaScript
 // thread: Linux queries the user manager, which may take the whole budget.
 struct Selection {
-  napi_async_work work=nullptr;
   napi_deferred deferred=nullptr;
   Token signal;
   uint32_t timeout=0;
   int status=OA_IPC_OK;
   uint32_t kind=0;
   std::string principal,program;
+  bool activation=false;
+  int32_t outcome=OA_IPC_ACTIVATION_NONE;
+  Clock::time_point deadline;
 };
 void select_execute(napi_env,void* p){
   auto& s=*static_cast<Selection*>(p);
   try{
+    if(s.activation){
+      auto left=s.deadline-Clock::now();
+      if(left<=Clock::duration::zero()){s.status=OA_IPC_TIMEOUT;return;}
+      if(!(oa_ipc_features()&OA_IPC_FEATURE_RUNTIME_ACTIVATION)){s.status=OA_IPC_PROOF_UNAVAILABLE;return;}
+      auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(left).count();
+      oa_ipc_server_expectation expected{sizeof(oa_ipc_server_expectation),1,s.kind,0,
+        s.principal.data(),s.principal.size(),s.program.data(),s.program.size()};
+      s.status=oa_ipc_activate_runtime(&expected,static_cast<uint32_t>(std::min<int64_t>(UINT32_MAX,std::max<int64_t>(1,ms))),
+        s.signal?s.signal->value:nullptr,&s.outcome);
+      if(s.status==OA_IPC_OK&&(s.outcome<OA_IPC_ACTIVATION_REQUEST_COMPLETED||s.outcome>OA_IPC_ACTIVATION_REFUSED))s.status=OA_IPC_INTERNAL_ERROR;
+      if(s.status==OA_IPC_OK&&Clock::now()>=s.deadline)s.status=OA_IPC_TIMEOUT;
+      return;
+    }
     oa_ipc_runtime_selection* raw=nullptr;
     s.status=oa_ipc_select_runtime(s.timeout,s.signal?s.signal->value:nullptr,&raw);
     if(s.status!=OA_IPC_OK)return;
@@ -226,11 +318,12 @@ void select_execute(napi_env,void* p){
 }
 void select_complete(napi_env env,napi_status status,void* p){
   std::unique_ptr<Selection> s(static_cast<Selection*>(p));
-  if(s->signal){auto& q=s->signal->queued;q.erase(std::remove(q.begin(),q.end(),s->work),q.end());}
   active.fetch_sub(1);
   if(status!=napi_ok&&s->status==OA_IPC_OK)s->status=OA_IPC_CANCELLED;
   napi_value result,field;
-  if(s->status==OA_IPC_OK&&napi_create_object(env,&result)==napi_ok&&
+  if(s->activation&&s->status==OA_IPC_OK&&napi_create_int32(env,s->outcome,&result)==napi_ok){
+    napi_resolve_deferred(env,s->deferred,result);
+  }else if(!s->activation&&s->status==OA_IPC_OK&&napi_create_object(env,&result)==napi_ok&&
       napi_create_uint32(env,s->kind,&field)==napi_ok&&napi_set_named_property(env,result,"principalKind",field)==napi_ok&&
       napi_create_string_utf8(env,s->principal.data(),s->principal.size(),&field)==napi_ok&&napi_set_named_property(env,result,"principal",field)==napi_ok&&
       napi_create_string_utf8(env,s->program.data(),s->program.size(),&field)==napi_ok&&napi_set_named_property(env,result,"program",field)==napi_ok){
@@ -244,7 +337,34 @@ void select_complete(napi_env env,napi_status status,void* p){
       napi_reject_deferred(env,s->deferred,result);
     }
   }
-  napi_delete_async_work(env,s->work);
+}
+void run_selection(Selection* s){select_execute(nullptr,s);}
+void drop_selection(void* p){delete static_cast<Selection*>(p);active.fetch_sub(1);}
+const Completion selection_completion{select_complete,drop_selection};
+napi_value activate_runtime(napi_env env,napi_callback_info info){
+  bool counted=false;
+  std::unique_ptr<Selection> s;
+  try{
+    size_t n=3;napi_value args[3];checked(napi_get_cb_info(env,info,&n,args,nullptr,nullptr));
+    if(n!=3)throw napi_invalid_arg;
+    s=std::make_unique<Selection>();s->activation=true;
+    napi_value field;double kind,timeout;
+    checked(napi_get_named_property(env,args[0],"principalKind",&field));checked(napi_get_value_double(env,field,&kind));
+    if(kind!=1&&kind!=2)throw napi_invalid_arg;s->kind=static_cast<uint32_t>(kind);
+    auto text=[&](const char* name){napi_value value;checked(napi_get_named_property(env,args[0],name,&value));size_t size=0;
+      checked(napi_get_value_string_utf8(env,value,nullptr,0,&size));if(size==0||size>65536)throw napi_invalid_arg;
+      std::vector<char> bytes(size+1);checked(napi_get_value_string_utf8(env,value,bytes.data(),bytes.size(),&size));
+      std::string value_text(bytes.data(),size);if(value_text.find('\0')!=std::string::npos)throw napi_invalid_arg;return value_text;};
+    s->principal=text("principal");s->program=text("program");
+    checked(napi_get_value_double(env,args[1],&timeout));if(!std::isfinite(timeout)||timeout<0||timeout>UINT32_MAX)throw napi_invalid_arg;
+    s->deadline=Clock::now()+std::chrono::milliseconds(static_cast<uint32_t>(timeout));
+    napi_valuetype type;checked(napi_typeof(env,args[2],&type));if(type!=napi_null&&type!=napi_undefined)s->signal=token(env,args[2]);
+    unsigned previous=active.fetch_add(1);counted=true;if(previous>=32)throw napi_queue_full;
+    napi_value promise;checked(napi_create_promise(env,&s->deferred,&promise));
+    dispatch(env,"oa.ipc.activate",selection_completion,s.get(),run_selection);s.release();return promise;
+  }catch(...){
+    if(counted)active.fetch_sub(1);return fail(env,"invalid or over-capacity runtime activation");
+  }
 }
 napi_value select_runtime(napi_env env,napi_callback_info info){
   bool counted=false;
@@ -259,15 +379,9 @@ napi_value select_runtime(napi_env env,napi_callback_info info){
     napi_valuetype type;checked(napi_typeof(env,args[1],&type));if(type!=napi_null&&type!=napi_undefined)s->signal=token(env,args[1]);
     unsigned previous=active.fetch_add(1);counted=true;
     if(previous>=32)throw napi_queue_full;
-    napi_value promise,name;checked(napi_create_promise(env,&s->deferred,&promise));checked(napi_create_string_utf8(env,"oa.ipc.select",NAPI_AUTO_LENGTH,&name));
-    checked(napi_create_async_work(env,nullptr,name,select_execute,select_complete,s.get(),&s->work));
-    if(s->signal)s->signal->queued.push_back(s->work);
-    checked(napi_queue_async_work(env,s->work));s.release();return promise;
+    napi_value promise;checked(napi_create_promise(env,&s->deferred,&promise));
+    dispatch(env,"oa.ipc.select",selection_completion,s.get(),run_selection);s.release();return promise;
   }catch(...){
-    if(s&&s->work){
-      if(s->signal){auto& q=s->signal->queued;q.erase(std::remove(q.begin(),q.end(),s->work),q.end());}
-      napi_delete_async_work(env,s->work);
-    }
     if(counted)active.fetch_sub(1);return fail(env,"invalid or over-capacity runtime selection");
   }
 }
@@ -336,10 +450,12 @@ napi_value init(napi_env env,napi_value exports){
   if(oa_ipc_version()!=1)return fail(env,"unsupported IPC ABI version");
   napi_property_descriptor methods[]={
     {"call",nullptr,call,nullptr,nullptr,nullptr,napi_default,nullptr},
+    {"features",nullptr,features,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"createCancellation",nullptr,create_signal,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"cancel",nullptr,cancel,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"runtimeEndpoint",nullptr,bootstrap,nullptr,nullptr,nullptr,napi_default,nullptr},
     {"selectRuntime",nullptr,select_runtime,nullptr,nullptr,nullptr,napi_default,nullptr},
+    {"activateRuntime",nullptr,activate_runtime,nullptr,nullptr,nullptr,napi_default,nullptr},
 #ifdef _WIN32
     {"withinPath",nullptr,within_path,nullptr,nullptr,nullptr,napi_default,nullptr},
 #endif

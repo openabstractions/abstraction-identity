@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/openabstractions/abstraction-identity/internal/personfolders"
 )
 
 const (
@@ -26,7 +28,8 @@ const (
 )
 
 // TestMain turns this binary into the socket client when the environment says
-// so, and otherwise runs the tests.
+// so, and otherwise runs the tests with the person's per-user folders inside
+// a temporary folder (personfolders.Main).
 func TestMain(m *testing.M) {
 	if ran, code := attackHelperMain(); ran {
 		os.Exit(code)
@@ -37,7 +40,7 @@ func TestMain(m *testing.M) {
 	if path := os.Getenv(unixClientEnv); path != "" {
 		os.Exit(runChildClient(path, os.Getenv(unixPayloadEnv), os.Getenv(unixLingerEnv) != ""))
 	}
-	os.Exit(m.Run())
+	os.Exit(personfolders.Main(m))
 }
 
 func runChildClient(path, payload string, linger bool) int {

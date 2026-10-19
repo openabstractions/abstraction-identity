@@ -18,13 +18,16 @@ typedef enum oa_xpc_status {
     OA_XPC_PROTOCOL = 6,
     OA_XPC_SYSTEM = 7,
     OA_XPC_UNAVAILABLE = 8,
-    OA_XPC_CALLER_PROOF_UNMET = 9
+    OA_XPC_CALLER_PROOF_UNMET = 9,
+    /* Local retained-occurrence result; never encoded as a wire status. */
+    OA_XPC_OCCURRENCE_ENDED = 10
 } oa_xpc_status;
 
 typedef struct oa_xpc_listener oa_xpc_listener;
 typedef struct oa_xpc_request oa_xpc_request;
 typedef struct oa_xpc_client oa_xpc_client;
 typedef struct oa_xpc_cancel oa_xpc_cancel;
+typedef struct oa_xpc_process oa_xpc_process;
 
 /* Borrowed strings remain valid until the request is freed. Connection
    credentials and message code are separate evidence sources. */
@@ -77,6 +80,21 @@ oa_xpc_status oa_xpc_request_wait(oa_xpc_request *request,
 uint8_t oa_xpc_request_active(oa_xpc_request *request);
 void oa_xpc_request_cancel(oa_xpc_request *request);
 void oa_xpc_request_free(oa_xpc_request *request);
+
+/* Acquire only from this active, validated message. The returned owner holds
+   only its dynamic SecCodeRef, independently of the request/connection. Calls
+   on one owner, including free, must be serialized by the Binding state. A
+   retained occurrence never authenticates a later message. Security errors
+   are returned separately; only errSecCSNoSuchCode means occurrence ended. */
+oa_xpc_status oa_xpc_request_retain_process(oa_xpc_request *request,
+                                            oa_xpc_process **out,
+                                            int32_t *security_status);
+oa_xpc_status oa_xpc_process_check(oa_xpc_process *process,
+                                   int32_t *security_status);
+oa_xpc_status oa_xpc_process_retain(oa_xpc_process *process,
+                                    oa_xpc_process **out,
+                                    int32_t *security_status);
+void oa_xpc_process_free(oa_xpc_process *process);
 
 oa_xpc_status oa_xpc_client_open(const char *service,
                                  const char *expected_program,

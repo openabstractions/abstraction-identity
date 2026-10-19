@@ -21,13 +21,15 @@ typedef int32_t oa_ipc_status;
 enum { OA_IPC_OK = 0, OA_IPC_TIMEOUT = 1, OA_IPC_DISCONNECTED = 2,
        OA_IPC_IO_ERROR = 3, OA_IPC_INVALID_ARGUMENT = 4,
        OA_IPC_NO_MEMORY = 5, OA_IPC_INTERNAL_ERROR = 6, OA_IPC_CANCELLED = 7,
-       OA_IPC_UNTRUSTED = 8, OA_IPC_PROOF_UNAVAILABLE = 9 };
+       OA_IPC_UNTRUSTED = 8, OA_IPC_PROOF_UNAVAILABLE = 9,
+       OA_IPC_OPEN_IO_ERROR = 10 };
 /* ABI version 1: shared native client primitives and local bootstrap. */
 OA_IPC_API uint32_t oa_ipc_version(void);
 /* Optional ABI-1 transport support query; missing symbol means no new features.
    A wrapper must check XPC support before passing that endpoint to an older
    library, which may otherwise interpret it as a Unix socket path. */
-enum { OA_IPC_FEATURE_XPC = 1 };
+enum { OA_IPC_FEATURE_XPC = 1, OA_IPC_FEATURE_RUNTIME_ACTIVATION = 2,
+       OA_IPC_FEATURE_SINGLE_EXCHANGE = 4, OA_IPC_FEATURE_OPEN_FAILURE = 8 };
 OA_IPC_API uint32_t oa_ipc_features(void);
 /* Additive ABI-1 bootstrap extension; no connection or service activation.
    required receives byte size INCLUDING trailing NUL. Query with NULL,0.
@@ -65,8 +67,9 @@ OA_IPC_API oa_ipc_status oa_ipc_open_cancelable(const char* endpoint, size_t len
    principal is a Windows SID (kind=1) or decimal POSIX uid (kind=2).
    program is the absolute executable image path (UTF-8 on Windows, filesystem
    bytes on POSIX). Byte spans exclude NUL; embedded NUL is refused. Windows
-   drive-absolute paths use ordinal case-insensitive comparison. POSIX paths
-   compare exactly. Paths describe OS process identity, not signed code.
+   paths must be local drive-absolute paths. The running image is bound to the
+   program by file identity (volume and file ID, or st_dev and st_ino), after
+   the principal check. Paths describe OS process identity, not signed code.
    Version 1 requires struct_size=sizeof(oa_ipc_server_expectation), version=1.
    Input spans are copied during open and need only remain valid for that call.
    A Windows retained process handle binds PID, creation time, image and primary
@@ -76,6 +79,19 @@ OA_IPC_API oa_ipc_status oa_ipc_open_cancelable(const char* endpoint, size_t len
    retain/recheck evidence before I/O and after reads, within the same waiting
    budget. Existing open functions retain their unverified compatibility mode. */
 enum { OA_IPC_PRINCIPAL_WINDOWS_SID = 1, OA_IPC_PRINCIPAL_POSIX_UID = 2 };
+/* Optional additive ABI-1 current-process principal query. This reads the
+   process primary-token SID on Windows or effective uid on POSIX; it supplies
+   no peer/server trust or authority, connects nowhere and activates nothing.
+   kind and required must be non-NULL. Query with NULL,0; required includes the
+   trailing NUL. On OK, kind is WINDOWS_SID or POSIX_UID and the supplied buffer
+   contains the principal. Caller owns all memory. Insufficient capacity leaves
+   buffer untouched and updates required; all failures set kind=0 and other
+   failures set required=0. Null/capacity combinations follow runtime_endpoint.
+   Calls independently observe the current process; retry a changed size.
+   An older library may lack this export: bindings must report PROOF_UNAVAILABLE
+   without an OS/shell fallback. */
+OA_IPC_API oa_ipc_status oa_ipc_current_principal(uint32_t* kind, char* buffer,
+                                                size_t capacity, size_t* required);
 typedef struct oa_ipc_server_expectation {
     uint32_t struct_size;
     uint32_t version;
@@ -103,6 +119,23 @@ OA_IPC_API oa_ipc_status oa_ipc_select_runtime(uint32_t timeout_ms,
 OA_IPC_API const oa_ipc_server_expectation* oa_ipc_selected_server(
     const oa_ipc_runtime_selection*);
 OA_IPC_API void oa_ipc_runtime_selection_release(oa_ipc_runtime_selection*);
+/* Additive ABI-1 installed bootstrap. Copies the expectation, independently
+   reselects the current installation/account and holds its current file identity
+   across one owned `start --timeout` child. No historical file pin is implied.
+   Environment endpoint overrides, unsupported proof and nonordinary callers
+   refuse. timeout_ms is one budget; cancellation never stops a running runtime.
+   outcome must be non-NULL and is initialized to NONE before effects. Values
+   are meaningful only with OA_IPC_OK and establish no peer readiness/ownership.
+   A normal verified resolver retry is required after COMPLETED or PRESENT. */
+enum {
+    OA_IPC_ACTIVATION_NONE = 0,
+    OA_IPC_ACTIVATION_REQUEST_COMPLETED = 1,
+    OA_IPC_ACTIVATION_ENDPOINT_PRESENT = 2,
+    OA_IPC_ACTIVATION_UPGRADE_IN_PROGRESS = 3,
+    OA_IPC_ACTIVATION_REFUSED = 4
+};
+OA_IPC_API oa_ipc_status oa_ipc_activate_runtime(const oa_ipc_server_expectation* expected,
+    uint32_t timeout_ms, oa_ipc_cancellation*, int32_t* outcome);
 OA_IPC_API oa_ipc_status oa_ipc_open_verified(const char* endpoint, size_t length,
     uint32_t timeout_ms, oa_ipc_cancellation*,
     const oa_ipc_server_expectation*, oa_ipc_connection** out);
@@ -130,7 +163,10 @@ OA_IPC_API void oa_ipc_close(oa_ipc_connection*);
    server's evidence before and after every read, as open_verified does.
    timeout_ms and the cancellation apply to this call alone; a call that fails,
    expires or is cancelled closes its connection. flags: 0 for an exchange,
-   OA_IPC_CALL_ONE_WAY for a one-way frame (no reply). An endpoint that answers
+   OA_IPC_CALL_ONE_WAY for a one-way frame (no reply). Combine
+   OA_IPC_CALL_SINGLE_EXCHANGE (requires FEATURE_SINGLE_EXCHANGE) to use a fresh
+   connection directly, without session negotiation, pooling or replay.
+   An endpoint that answers
    a session request as single-exchange, or closes it unanswered, is served one
    connection per call for 30 seconds. Use it only where the server answers or
    closes an oversized header; a server that does neither makes the call wait
@@ -143,13 +179,21 @@ OA_IPC_API void oa_ipc_close(oa_ipc_connection*);
    On success an exchange sets *reply (release with oa_ipc_reply_release); a
    one-way call sets it to NULL. *sent receives the request bytes written to a
    connection that was never reported closed before reading them; a failure
-   with *sent equal to the frame length may have reached the server. A request
+   with *sent equal to the frame length may have reached the server. This counts
+   payload bytes only: zero never proves an empty request was not delivered.
+   A request
    the server announced it did not read (closing marker) is repeated once on a
    new connection within the same budget. Payloads use the low 30 length bits.
    An explicit receiver caller-proof refusal is terminal and returns
    PROOF_UNAVAILABLE with no reply; status 9 also covers locally unavailable
    proof facilities. */
-enum { OA_IPC_CALL_ONE_WAY = 1 };
+/* With FEATURE_OPEN_FAILURE, REPORT_OPEN_FAILURE opts into OPEN_IO_ERROR only
+   when the initial native stream open fails with IO_ERROR before any protocol
+   write attempt. All later negotiation/fallback/reused/write/read failures keep
+   their existing status. XPC never supplies this classification. Calls without
+   this flag retain statuses 0..9. The confirmed payload count is unchanged. */
+enum { OA_IPC_CALL_ONE_WAY = 1, OA_IPC_CALL_SINGLE_EXCHANGE = 2,
+       OA_IPC_CALL_REPORT_OPEN_FAILURE = 4 };
 typedef struct oa_ipc_reply oa_ipc_reply;
 OA_IPC_API oa_ipc_status oa_ipc_session_call(const char* endpoint, size_t length,
     uint32_t timeout_ms, oa_ipc_cancellation*, const oa_ipc_server_expectation*,

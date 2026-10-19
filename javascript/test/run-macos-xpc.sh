@@ -4,25 +4,32 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 IDENTITY_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 NODE=${NODE:-node}
+BUN=${BUN:-bun}
 GO=${GO:-go}
 CMAKE=${CMAKE:-cmake}
 
 if [[ ${1:-} == "--help" || $# -eq 0 ]]; then
     cat <<'EOF'
-Usage: run-macos-xpc.sh --node | --rust | --all
+Usage: run-macos-xpc.sh --node | --bun | --rust | --all
 
 Build the existing shared C transport and disposable Go XPC listener, register
 one unique launchd service, run the selected language fixture, and remove the
-service and temporary build tree. Rust requires an existing cargo executable;
+service and temporary build tree. Bun and Rust require existing executables;
 this script never installs a toolchain.
 EOF
     exit 0
 fi
-if [[ $# -ne 1 || ! $1 =~ ^--(node|rust|all)$ ]]; then
-    echo "usage: run-macos-xpc.sh --node | --rust | --all" >&2
+if [[ $# -ne 1 || ! $1 =~ ^--(node|bun|rust|all)$ ]]; then
+    echo "usage: run-macos-xpc.sh --node | --bun | --rust | --all" >&2
     exit 2
 fi
 MODE=${1#--}
+if [[ $MODE == bun || $MODE == all ]]; then
+    if ! BUN=$(command -v "$BUN") || [[ ! -x $BUN ]]; then
+        echo "existing Bun executable required for Bun runtime proof" >&2
+        exit 3
+    fi
+fi
 WORK=${OA_XPC_WORK:-$(mktemp -d /tmp/oa-xpc-language-proof.XXXXXX)}
 mkdir -p "$WORK"
 UID_VALUE=$(id -u)
@@ -88,6 +95,15 @@ if [[ $MODE == node || $MODE == all ]]; then
     codesign --force --sign - "$WORK/node/oa_ipc_node.node" >/dev/null
     ABSTRACTION_IPC_NODE="$WORK/node/oa_ipc_node.node" \
         "$NODE" --test "$SCRIPT_DIR/xpc.test.mjs"
+fi
+
+if [[ $MODE == bun || $MODE == all ]]; then
+    "$CMAKE" -S "$IDENTITY_DIR/cpp" -B "$WORK/shared" \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+        -DABSTRACTION_IPC_BUILD_TESTS=OFF
+    "$CMAKE" --build "$WORK/shared" --config Release --target abstraction_ipc --parallel
+    ABSTRACTION_IPC_LIBRARY="$WORK/shared/libabstraction_ipc.dylib" \
+        "$BUN" test "$SCRIPT_DIR/xpc.test.mjs"
 fi
 
 if [[ $MODE == rust || $MODE == all ]]; then

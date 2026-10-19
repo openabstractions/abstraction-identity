@@ -18,7 +18,8 @@ var ErrNotLocalFile = errors.New("identity: not an absolute path on a local driv
 // without opening it; a junction or link leading off such a drive returns
 // ErrNotLocalFile after the open and before verification. The file is held
 // without write sharing for the verification, so a file another handle holds
-// open for writing returns a sharing violation. The signer is read by path, and the file the handle names
+// open for writing returns a sharing violation. The accepted native trust state
+// supplies the signer, and the file the handle names
 // must still be at path afterwards, or VerifyFile returns an error. Code and Proof
 // follow a peer's Authenticode rungs: a file Windows accepted is ProofBound
 // with Trusted set, Subject and Issuer name an embedded signer, and Catalog
@@ -26,4 +27,14 @@ var ErrNotLocalFile = errors.New("identity: not an absolute path on a local driv
 // returns ErrUnimplemented (ID-E4).
 func VerifyFile(path string, opts *Options) (Code, Proof, error) {
 	return verifyPathFile(path, opts)
+}
+
+// VerifyFilePublisher uses VerifyFile's held native verification and also copies
+// P-06's opaque publisher key from the accepted embedded signer's DER subject.
+// The key is empty for an untrusted, catalog-signed or unsupported image. Code,
+// Proof, Options and native FFI layouts retain their existing representation.
+func VerifyFilePublisher(path string, opts *Options) (Code, Proof, string, error) {
+	var key string
+	code, proof, err := verifyPathFileCaptured(path, opts, &key)
+	return code, proof, key, err
 }

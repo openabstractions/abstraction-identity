@@ -79,7 +79,7 @@ func readOwnerTable(proc *windows.LazyProc, family, class uint32) ([]byte, error
 // processCreation reads a process's creation time in the form a supervised
 // job records it, time.Unix(0, FILETIME nanoseconds).
 func processCreation(pid int) (time.Time, error) {
-	if pid <= 0 || pid > int(^uint32(0)) {
+	if pid <= 0 || uint64(pid) > uint64(^uint32(0)) {
 		return time.Time{}, errors.New("process id out of range")
 	}
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))

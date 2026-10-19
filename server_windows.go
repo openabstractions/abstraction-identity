@@ -38,7 +38,7 @@ func bindServerHandle(h Handle, opts *Options) (binder, *Peer, error) {
 	if err := windows.GetNamedPipeServerProcessId(pipe, &pid); err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrNoBinding, err)
 	}
-	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, pid)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrNoBinding, err)
 	}

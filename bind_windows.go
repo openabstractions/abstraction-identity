@@ -53,7 +53,7 @@ func bindHandle(h Handle, opts *Options) (binder, *Peer, error) {
 		return nil, nil, fmt.Errorf("%w: GetNamedPipeClientProcessId: %v", ErrNoBinding, err)
 	}
 
-	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	proc, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, pid)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: pid %d could not be opened (%v); it exited before it could be pinned", ErrPeerGone, pid, err)
 	}
@@ -98,11 +98,7 @@ func (b *windowsBinding) recheck() error {
 }
 
 func (b *windowsBinding) alive() (bool, error) {
-	var code uint32
-	if err := windows.GetExitCodeProcess(b.proc, &code); err != nil {
-		return false, err
-	}
-	return code == stillActive, nil
+	return windowsProcessAlive(b.proc)
 }
 
 func (b *windowsBinding) release() error {

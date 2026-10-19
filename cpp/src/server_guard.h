@@ -7,10 +7,12 @@
 #include <limits>
 #include <cstdint>
 #include <vector>
+#include "session_test_hooks.h"
 #ifdef _WIN32
 #include <sddl.h>
 #elif defined(__linux__)
 #include <poll.h>
+#include <sys/stat.h>
 #endif
 
 namespace abstraction { namespace ipc_internal {
@@ -62,11 +64,20 @@ public:
         if (!::GetProcessTimes(process_, &created_, &exit, &kernel, &user)) return OA_IPC_UNTRUSTED;
         const auto connected = stream.connected_at();
         if (::CompareFileTime(&created_, &connected) > 0) return OA_IPC_UNTRUSTED;
+        // The principal first: a server of another account is refused before
+        // the client opens any file it names.
+        if (!check()) return OA_IPC_UNTRUSTED;
         std::vector<wchar_t> image(32768);
         DWORD size = static_cast<DWORD>(image.size());
         if (!::QueryFullProcessImageNameW(process_, 0, image.data(), &size)) return OA_IPC_UNTRUSTED;
-        if (::CompareStringOrdinal(image.data(), static_cast<int>(size), image_.data(), static_cast<int>(image_.size()), TRUE) != CSTR_EQUAL)
-            return OA_IPC_UNTRUSTED;
+        // File identity, not the name: a renamed or differently spelled image
+        // (hard link, 8.3 alias, junction) keeps the check; another file at
+        // the expected name fails it. Only local drive paths are opened, so a
+        // reported share or WebDAV name causes no remote open.
+        const std::wstring reported(image.data(), size);
+        FileIdentity running{}, installed{};
+        if (!local_image(reported) || !local_image(image_) || !identity_of(reported, running) ||
+            !identity_of(image_, installed) || !(running == installed)) return OA_IPC_UNTRUSTED;
         return check() ? OA_IPC_OK : OA_IPC_UNTRUSTED;
 #elif defined(__linux__)
         std::uint64_t uid = 0;
@@ -113,23 +124,57 @@ public:
         if (pidfd_ < 0 || pid_ <= 0) return false;
         pollfd poll{pidfd_, POLLIN, 0};
         if (::poll(&poll, 1, 0) != 0) return false;
-        std::vector<char> image(32769);
+        // stat on /proc/<pid>/exe follows the kernel's reference to the mapped
+        // image file, so a rename keeps its identity and a replacement at the
+        // installed name does not match it.
         const auto path = "/proc/" + std::to_string(pid_) + "/exe";
-        const auto size = ::readlink(path.c_str(), image.data(), image.size());
-        if (size < 0 || static_cast<std::size_t>(size) >= image.size()) return false;
-        std::string actual(image.data(), static_cast<std::size_t>(size));
-        // Match the existing Go path vocabulary for a retained deleted image.
-        constexpr std::string_view deleted = " (deleted)";
-        if (actual.size() >= deleted.size() && actual.compare(actual.size()-deleted.size(), deleted.size(), deleted) == 0)
-            actual.resize(actual.size()-deleted.size());
-        return actual == program_;
+        struct stat running{}, installed{};
+        if (::stat(path.c_str(), &running) != 0 || ::stat(program_.c_str(), &installed) != 0) return false;
+        if (::poll(&poll, 1, 0) != 0) return false; // the pid still names the pidfd's process
+        return running.st_dev == installed.st_dev && running.st_ino == installed.st_ino;
 #else
         return false;
 #endif
     }
+#ifdef _WIN32
+    // A drive-letter path on a drive that is not a network drive. UNC, device
+    // and relative names are refused without opening them.
+    static bool local_image(const std::wstring& name) {
+        if (name.size() < 3 || name[1] != L':' || name[2] != L'\\') return false;
+        const wchar_t drive = name[0];
+        if (!((drive >= L'A' && drive <= L'Z') || (drive >= L'a' && drive <= L'z'))) return false;
+        const wchar_t root[4] = {drive, L':', L'\\', 0};
+        const UINT type = ::GetDriveTypeW(root);
+        return type == DRIVE_FIXED || type == DRIVE_REMOVABLE || type == DRIVE_RAMDISK || type == DRIVE_CDROM;
+    }
+#endif
 private:
+    friend struct RuntimeActivationFile;
     std::string principal_, program_;
 #ifdef _WIN32
+    struct FileIdentity {
+        ULONGLONG volume = 0;
+        FILE_ID_128 id{};
+        bool operator==(const FileIdentity& o) const {
+            return volume == o.volume && std::memcmp(id.Identifier, o.id.Identifier, sizeof(id.Identifier)) == 0;
+        }
+    };
+    // Volume serial and file ID read from a handle opened on the name.
+    static bool identity_of(const std::wstring& name, FileIdentity& out) {
+#ifdef ABSTRACTION_IPC_TEST_HOOKS
+        ++server_guard_test_opens;
+#endif
+        HANDLE file = ::CreateFileW(name.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        FILE_ID_INFO info{};
+        const BOOL read = ::GetFileInformationByHandleEx(file, FileIdInfo, &info, sizeof(info));
+        ::CloseHandle(file);
+        if (!read) return false;
+        out.volume = info.VolumeSerialNumber;
+        out.id = info.FileId;
+        return true;
+    }
     static bool wide(const std::string& text, std::wstring& out) {
         const int size = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0);
         if (!size) return false;

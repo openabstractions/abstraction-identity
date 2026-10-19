@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <vector>
 #include "runtime_selection_linux.h"
+#include <abstraction/ipc/process.hpp>
 #ifdef __APPLE__
 #include <pwd.h>
 #include <unistd.h>
@@ -12,7 +13,6 @@
 #endif
 #ifdef _WIN32
 #include <msi.h>
-#include <abstraction/ipc/process.hpp>
 #endif
 
 namespace abstraction::ipc_internal {
@@ -87,7 +87,7 @@ oa_ipc_status select_windows_runtime(RuntimeIdentity& out, const std::string& si
 #ifdef __linux__
 inline oa_ipc_status select_linux_runtime(RuntimeIdentity& out,local_stream::Deadline deadline,
     local_stream::Cancellation* cancellation,const char* executable="/usr/bin/systemctl") {
-    if(::getuid()!=::geteuid())return OA_IPC_UNTRUSTED;
+    if(::getuid()!=ipc::process_effective_uid())return OA_IPC_UNTRUSTED;
     std::string output,program;
     auto status=linux_selection::query(output,deadline,cancellation,executable);
     if(status!=OA_IPC_OK)return status;
@@ -97,7 +97,7 @@ inline oa_ipc_status select_linux_runtime(RuntimeIdentity& out,local_stream::Dea
     std::string canonical(resolved);::free(resolved);
     status=selection_budget(deadline,cancellation);if(status!=OA_IPC_OK)return status;
     out.kind=OA_IPC_PRINCIPAL_POSIX_UID;
-    out.principal=std::to_string(::geteuid());out.program=std::move(canonical);
+    out.principal=std::to_string(ipc::process_effective_uid());out.program=std::move(canonical);
     return OA_IPC_OK;
 }
 #endif
@@ -132,8 +132,8 @@ inline oa_ipc_status select_runtime_identity(RuntimeIdentity& out, local_stream:
     return select_linux_runtime(out,deadline,cancellation);
 #elif defined(__APPLE__)
     if(!oa_xpc_available())return OA_IPC_PROOF_UNAVAILABLE;
-    if(::getuid()!=::geteuid())return OA_IPC_UNTRUSTED;
-    const uid_t uid=::geteuid();
+    if(::getuid()!=ipc::process_effective_uid())return OA_IPC_UNTRUSTED;
+    const uid_t uid=ipc::process_effective_uid();
     long capacity=::sysconf(_SC_GETPW_R_SIZE_MAX);
     if(capacity<1024)capacity=16384;
     if(capacity>1024*1024)return OA_IPC_UNTRUSTED;

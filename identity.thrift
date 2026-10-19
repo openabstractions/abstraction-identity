@@ -57,3 +57,29 @@ const list<string> native_binding_types = ["Handle", "Peer", "Attr<T>", "User", 
 // Native OS handles, ownership, connect-time clocks and generic Attr<T> cannot
 // cross a message as authority. This generates common vocabulary only; the
 // native binding supplies these types, proof comparison and extraction methods.
+// The shared transport's constants (openabstractions-flat/abstraction-ipc/CONTRACT.md):
+// the C ABI status codes, whose transport class IPC-E1 names, in the values
+// abstraction/ipc/client.h declares; the frame bounds of IPC-F1; and the
+// default call budget of IPC-D1. The Go transport (listen) reads them from
+// this definition's Go api package; the Python, C++, Rust and JavaScript IPC
+// bindings read them from abstraction.ipc.constants (scripts/generate.targets).
+// The 2 MiB client maximum is the largest frame limit those clients accepted
+// before these constants; IPC-F1 does not state it yet (TODO.md, W1-23a
+// follow-ups).
+const i32 ipc_ok = 0
+const i32 ipc_timeout = 1
+const i32 ipc_disconnected = 2
+const i32 ipc_io_error = 3
+const i32 ipc_invalid_argument = 4
+const i32 ipc_no_memory = 5
+const i32 ipc_internal_error = 6
+const i32 ipc_cancelled = 7
+const i32 ipc_untrusted = 8
+const i32 ipc_proof_unavailable = 9
+// IPC-F1: the default maximum frame and the payload ceiling a four-byte
+// header can carry; between them, the largest maximum a client binding accepts.
+const i32 ipc_default_max_frame = 1048576
+const i32 ipc_client_max_frame = 2097152
+const i32 ipc_wire_max_frame = 1073741823
+// IPC-D1: the budget of a call that names none, in milliseconds.
+const i32 ipc_default_call_budget_ms = 5000

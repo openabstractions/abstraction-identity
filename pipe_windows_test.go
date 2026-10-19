@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/openabstractions/abstraction-identity/internal/personfolders"
 	"golang.org/x/sys/windows"
 )
 
@@ -108,13 +110,18 @@ func readFrom(t *testing.T, h windows.Handle) []byte {
 // a genuinely different process with its own pid - which is the only way to
 // tell a correct answer from one that happens to describe the test itself.
 func startChildClient(t *testing.T, name, payload string) *exec.Cmd {
+	return startChildClientExit(t, name, payload, 0)
+}
+
+// startChildClientExit selects the owned fixture's actual process exit status.
+func startChildClientExit(t *testing.T, name, payload string, exit int) *exec.Cmd {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(exe)
-	cmd.Env = append(os.Environ(), clientEnv+"="+name, clientEnv+"_PAYLOAD="+payload)
+	cmd.Env = append(os.Environ(), clientEnv+"="+name, clientEnv+"_PAYLOAD="+payload, clientEnv+"_EXIT="+strconv.Itoa(exit))
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -124,7 +131,8 @@ func startChildClient(t *testing.T, name, payload string) *exec.Cmd {
 }
 
 // TestMain turns this binary into the pipe client when the environment says
-// so, and otherwise runs the tests.
+// so, and otherwise runs the tests with the person's per-user folders inside
+// a temporary folder (personfolders.Main).
 func TestMain(m *testing.M) {
 	if ran, code := loopbackHelperMain(); ran {
 		os.Exit(code)
@@ -132,7 +140,7 @@ func TestMain(m *testing.M) {
 	if name := os.Getenv(clientEnv); name != "" {
 		os.Exit(runChildClient(name, os.Getenv(clientEnv+"_PAYLOAD")))
 	}
-	os.Exit(m.Run())
+	os.Exit(personfolders.Main(m))
 }
 
 func runChildClient(name, payload string) int {
@@ -166,5 +174,12 @@ func runChildClient(name, payload string) int {
 	// the process still exists. A peer that exits first is a real case, and
 	// it has its own test.
 	time.Sleep(3 * time.Second)
+	if exit := os.Getenv(clientEnv + "_EXIT"); exit != "" {
+		code, err := strconv.Atoi(exit)
+		if err != nil {
+			return 1
+		}
+		return code
+	}
 	return 0
 }

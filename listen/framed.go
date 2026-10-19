@@ -13,14 +13,81 @@ import (
 	"time"
 
 	identity "github.com/openabstractions/abstraction-identity"
+	api "github.com/openabstractions/abstraction-identity/go/abstraction/identity/api"
 )
 
-const DefaultMaxFrame uint32 = 1024 * 1024
-const DefaultFrameTimeout = 5 * time.Second
+// DefaultMaxFrame is abstraction-ipc IPC-F1's default maximum frame and
+// DefaultFrameTimeout IPC-D1's budget of a call that names none, both read
+// from identity.thrift's generated transport constants.
+const DefaultMaxFrame = uint32(api.IPCDefaultMaxFrame)
+const DefaultFrameTimeout = time.Duration(api.IPCDefaultCallBudgetMs) * time.Millisecond
 
 var ErrFrameTooLarge = errors.New("listen: frame exceeds limit")
 var ErrUnexpectedResponse = errors.New("listen: response bytes on one-way connection")
 var ErrFrameDeadline = errors.New("listen: connection cannot enforce deadline")
+
+// ErrRequestNotSent proves that a custom-Dialer call failed before attempting
+// its application frame. It makes no claim about another call or retry policy.
+var ErrRequestNotSent = errors.New("listen: request not sent")
+
+// ErrRequestUncertain means a custom-Dialer call attempted its application
+// frame but received no authoritative answer. Execution may have occurred.
+var ErrRequestUncertain = errors.New("listen: request outcome uncertain")
+
+func (c FrameClient) requestError(err error, attempted bool) error {
+	if err == nil || c.Dialer == nil || errors.Is(err, ErrCallerProofUnmet) {
+		return err
+	}
+	if attempted {
+		return errors.Join(ErrRequestUncertain, err)
+	}
+	return errors.Join(ErrRequestNotSent, err)
+}
+
+func (c FrameClient) customCallError(ctx context.Context, err error, attempted bool) error {
+	if errors.Is(err, ErrCallerProofUnmet) {
+		return err
+	}
+	if normalized := frameError(ctx, err); normalized != nil && !errors.Is(err, normalized) {
+		err = errors.Join(err, normalized)
+	}
+	return c.requestError(err, attempted)
+}
+
+// customFrameCall owns the delivery classification for authenticated custom
+// streams. Even a zero-byte failed Write can hide progress inside its transport.
+// A complete proof refusal remains the receiver's authoritative refusal.
+func (c FrameClient) customFrameCall(parent context.Context, frame []byte, oneWay bool) ([]byte, error) {
+	limit := frameLimit(c.MaxFrame)
+	if uint64(len(frame)) > uint64(limit) {
+		return nil, c.requestError(ErrFrameTooLarge, false)
+	}
+	ctx, cancel := frameContext(parent, c.Timeout)
+	defer cancel()
+	conn, close, err := c.connect(ctx)
+	if err != nil {
+		return nil, c.customCallError(ctx, err, false)
+	}
+	defer close()
+	if err := ctx.Err(); err != nil {
+		return nil, c.requestError(err, false)
+	}
+	if err := writeFrame(conn, frame, limit); err != nil {
+		return nil, c.customCallError(ctx, refusalAfterWriteError(ctx, conn, err, false), true)
+	}
+	if oneWay {
+		return nil, c.customCallError(ctx, waitFrameEOF(conn), true)
+	}
+	// The custom dialer owns authentication and cannot use local Server evidence.
+	// Keep its deadline/close owner, but do not let the local guard's post-read
+	// cancellation check discard a complete response. Generated decoding owns the
+	// opaque payload; a complete service answer remains available after cancel.
+	reply, err := readFrame(conn.(*serverConn).Conn, limit)
+	if err == nil {
+		return reply, nil
+	}
+	return reply, c.customCallError(ctx, err, true)
+}
 
 func frameLimit(n uint32) uint32 {
 	if n == 0 {
@@ -190,13 +257,13 @@ type contextFrameClient struct {
 
 func (c contextFrameClient) WriteFrame(frame []byte) error {
 	if err := c.ctx.Err(); err != nil {
-		return err
+		return c.client.requestError(err, false)
 	}
 	return c.client.WriteFrameContext(c.ctx, frame)
 }
 func (c contextFrameClient) ExchangeFrame(frame []byte) ([]byte, error) {
 	if err := c.ctx.Err(); err != nil {
-		return nil, err
+		return nil, c.client.requestError(err, false)
 	}
 	return c.client.ExchangeFrameContext(c.ctx, frame)
 }
@@ -240,6 +307,10 @@ func (c FrameClient) connect(ctx context.Context) (net.Conn, func(), error) {
 	return guard, func() { stop(); guard.Close() }, nil
 }
 func (c FrameClient) WriteFrameContext(parent context.Context, frame []byte) error {
+	if c.Dialer != nil {
+		_, err := c.customFrameCall(parent, frame, true)
+		return err
+	}
 	limit := frameLimit(c.MaxFrame)
 	if uint64(len(frame)) > uint64(limit) {
 		return ErrFrameTooLarge
@@ -275,6 +346,9 @@ func (c FrameClient) sessions(length int) bool {
 		!frames.isSingle(c.poolKey(), time.Now())
 }
 func (c FrameClient) ExchangeFrameContext(parent context.Context, frame []byte) ([]byte, error) {
+	if c.Dialer != nil {
+		return c.customFrameCall(parent, frame, false)
+	}
 	limit := frameLimit(c.MaxFrame)
 	if uint64(len(frame)) > uint64(limit) {
 		return nil, ErrFrameTooLarge
@@ -371,6 +445,11 @@ func (k *FramedCall) finishWatching() error {
 	k.watchStopping.Store(true)
 	d := k.conn.(interface{ SetDeadline(time.Time) error })
 	if err := d.SetDeadline(time.Now()); err != nil {
+		if k.ctx.Err() != nil {
+			// An aborted session exchange keeps its slot until the handler's Close (IPC-A11).
+			<-k.watchDone
+			return k.ctx.Err()
+		}
 		k.Close()
 		<-k.watchDone
 		return err
@@ -398,7 +477,7 @@ func ReceiveFramed(parent context.Context, c Conn, need identity.Need, maxFrame 
 	k := &FramedCall{conn: c, ctx: ctx, cancel: cancel, limit: frameLimit(maxFrame)}
 	// Close and binding checks serialize: Unix Conn.Close also releases binding.
 	k.mu.Lock()
-	k.stop = context.AfterFunc(ctx, func() { k.Close() })
+	k.stop = context.AfterFunc(ctx, k.abort)
 	k.mu.Unlock()
 	canRefuse := false
 	fail := func(err error) (*FramedCall, error) {
@@ -549,6 +628,37 @@ func (k *FramedCall) Recheck() error {
 	return err
 }
 
+// RetainProcess derives an independently owned process pin from this call's
+// actual binding. Acquire it before Close or cancellation and close the result.
+// Connection/session retirement does not release the pin. Lease consumers must
+// check Alive, Peer/Check and EvidenceValidUntil; Peer preserves historical
+// capture semantics after exit. Transports without independent retention refuse.
+func (k *FramedCall) RetainProcess() (*identity.Binding, error) {
+	if k == nil {
+		return nil, net.ErrClosed
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed {
+		return nil, net.ErrClosed
+	}
+	if k.ctx == nil || k.binding == nil {
+		return nil, identity.ErrNoBinding
+	}
+	if err := k.ctx.Err(); err != nil {
+		return nil, err
+	}
+	pin, err := k.binding.RetainProcess()
+	if err != nil {
+		return nil, err
+	}
+	if err = k.ctx.Err(); err != nil {
+		pin.Close()
+		return nil, err
+	}
+	return pin, nil
+}
+
 // Reply sends one frame and waits for client EOF so Windows writes are drained.
 func (k *FramedCall) Reply(frame []byte) error {
 	k.replyOnce.Do(func() {
@@ -576,6 +686,23 @@ func (k *FramedCall) Reply(frame []byte) error {
 	})
 	return k.replyErr
 }
+
+// abort ends a cancelled call's I/O. A connection that holds a listener slot
+// (a session exchange) keeps that slot until the handler's own Close, so a
+// cancelled call cannot free capacity while its handler still runs (IPC-A11).
+func (k *FramedCall) abort() {
+	k.mu.Lock()
+	a, ok := k.conn.(interface{ abort() })
+	if !ok || k.closed {
+		k.mu.Unlock()
+		//unchecked: best-effort teardown triggered by context cancellation, no caller left to report a close failure to
+		k.Close()
+		return
+	}
+	a.abort()
+	k.mu.Unlock()
+}
+
 func (k *FramedCall) Close() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()

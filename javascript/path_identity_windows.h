@@ -6,6 +6,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "../fileid/native_windows.h"
 
 #include <algorithm>
 #include <array>
@@ -231,10 +232,9 @@ struct PathIdentity {
 inline FileInfo file_info(HANDLE handle, const std::wstring& path) {
     // FileIdInfo is value 18 in FILE_INFO_BY_HANDLE_CLASS. Keeping the layout
     // local avoids requiring a newer Windows SDK typedef in the public build.
-    struct IdInfo { ULONGLONG volume; BYTE id[16]; } wide{};
-    constexpr auto file_id_info = static_cast<FILE_INFO_BY_HANDLE_CLASS>(18);
+    OA_NATIVE_FILE_ID wide{};
     FileKey key;
-    if (::GetFileInformationByHandleEx(handle, file_id_info, &wide, sizeof(wide))) {
+    if (oa_native_id(handle, &wide)) {
         key.volume = wide.volume;
         std::copy(std::begin(wide.id), std::end(wide.id), key.id.begin());
         key.length = sizeof(wide.id);

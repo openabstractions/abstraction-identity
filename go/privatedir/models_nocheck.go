@@ -5,19 +5,18 @@ package privatedir
 import (
 	"fmt"
 	"runtime"
+
+	"github.com/openabstractions/abstraction-identity/fileid"
 )
 
 // protectModels has no owner rule on this platform.
-func protectModels(string, []string) error {
+func protectModelsAt(fileid.Handle, []fileid.Handle) error {
 	return fmt.Errorf("no owner rule on %s", runtime.GOOS)
 }
 
-// checkModels has no owner check on this platform.
-func checkModels(string) error {
-	return fmt.Errorf("no owner check on %s", runtime.GOOS)
-}
+func modelKnownFolders() []string { return []string{""} }
 
-// checkRoot has no root rule on this platform.
-func checkRoot(string) error {
-	return fmt.Errorf("no models root rule on %s", runtime.GOOS)
+// checkModels has no owner check on this platform.
+func checkModelsAt(fileid.Handle) error {
+	return fmt.Errorf("no owner check on %s", runtime.GOOS)
 }

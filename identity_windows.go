@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openabstractions/abstraction-identity/fileid"
 	"golang.org/x/sys/windows"
 )
 
@@ -77,6 +78,11 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 
 	// 3. The user, from the kernel, via a token that is dropped immediately.
 	user, why, err := peerUser(pipe)
+	// The pipe token alone does not make the peer elevated: its pinned
+	// process's primary token must agree (step 5), so every early return
+	// below leaves Elevated false [ID-H3].
+	pipeElevated := user.Elevated
+	user.Elevated = false
 	switch {
 	case err == nil:
 		p.User = attr("user", user, ProofKernel, why)
@@ -149,6 +155,17 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 	p.Process = attr("process", Process{PID: int(pid), StartTime: started}, ProofKernel,
 		"the pid came from the kernel's record of this pipe instance; the start time predates the connection, so it is not a recycled pid")
 
+	// The pipe token reads elevated only when the pinned process's own
+	// primary token is the same account and elevated too [ID-H3].
+	if pipeElevated {
+		if processElevated(proc, user.SID) {
+			user.Elevated = true
+			p.User = attr("user", user, ProofKernel, why)
+		} else {
+			p.note("user: the pipe token is elevated and the process's primary token is not, so the peer is not elevated")
+		}
+	}
+
 	// 6. Everything from here is read through the pinned handle: bound to
 	// the right process, but still only the operating system's bookkeeping.
 	imagePath, err := processImagePath(proc)
@@ -162,14 +179,8 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 
 	// 7. Package identity, where there is one. This is the only Windows
 	// answer that comes out of a signature the OS itself validated.
-	if name, err := packageFullName(proc); err != nil {
-		p.Package = unknown[string]("package", "GetPackageFullName failed: "+err.Error())
-	} else if name == "" {
-		p.Package = unknown[string]("package", "the peer is an ordinary executable, not an MSIX package; Windows has no package identity to give")
-	} else {
-		p.Package = attr("package", name, ProofSigned,
-			"an MSIX package full name; its publisher hash comes from the certificate Windows validated when the package was installed")
-	}
+	p.Package = packageOf(proc,
+		"an MSIX package full name; its publisher hash comes from the certificate Windows validated when the package was installed")
 
 	// 8. Authenticode. Deliberately last, because it is the slowest and the
 	// weakest of the strong-looking answers.
@@ -179,7 +190,8 @@ func ofHandle(h Handle, opts *Options) (*Peer, error) {
 	case !p.Path.Known():
 		p.Code = unknown[Code]("code", "there is no image path to verify")
 	default:
-		code, verdict, verifiedAt, err := verifyProcessImageAt(proc, pid, started, imagePath, opts)
+		u, _ := p.User.Get()
+		code, verdict, verifiedAt, err := verifyProcessImageAt(proc, pid, started, imagePath, u.SID, opts)
 		if err != nil {
 			p.Code = unknown[Code]("code", "verification could not be performed: "+err.Error())
 			p.note("code: %v", err)
@@ -210,11 +222,31 @@ func requireLocalPeer(pipe windows.Handle) error {
 	}
 	// A computer name is not a path: it compares as Windows compares
 	// computer names, ordinal ignoring case through the system uppercase
-	// table (CompareStringOrdinal), never by Unicode folding.
-	if !ordinalEqualIgnoringCase(client, local) {
+	// table (CompareStringOrdinal), never by Unicode folding. That is the
+	// rule fileid.SamePathName applies to names on Windows.
+	if !fileid.SamePathName(client, local) {
 		return fmt.Errorf("%w: the client is on %q, not %q", ErrRemotePeer, client, local)
 	}
 	return nil
+}
+
+// readPackageFullName is packageFullName; tests make it fail.
+var readPackageFullName = packageFullName
+
+// packageOf reads proc's package identity for every Windows reader (the
+// named pipe, loopback and AF_UNIX): a name is the package, ProofSigned with
+// signedWhy; no package reads whyNotPackaged, the one answer SameView reads
+// as this process's view; a failed call keeps its own reason, which SameView
+// refuses as missing evidence.
+func packageOf(proc windows.Handle, signedWhy string) Attr[string] {
+	name, err := readPackageFullName(proc)
+	switch {
+	case err != nil:
+		return unknown[string]("package", "GetPackageFullName failed: "+err.Error())
+	case name == "":
+		return unknown[string]("package", whyNotPackaged)
+	}
+	return attr("package", name, ProofSigned, signedWhy)
 }
 
 func processStartTime(proc windows.Handle) (time.Time, error) {

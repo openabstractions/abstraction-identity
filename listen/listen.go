@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"io"
+	"net"
 	"strings"
 	"sync"
 
@@ -69,6 +70,8 @@ type Call struct {
 	gone   chan struct{}
 	drain  sync.Once
 	end    sync.Once
+	mu     sync.Mutex
+	closed bool
 }
 
 // Receive is the only way a service gets a frame, and a frame never arrives
@@ -102,8 +105,23 @@ func Receive(c Conn, need identity.Need, maxFrame int) (*Call, error) {
 // Recheck asks whether the connection still answers for the caller it was
 // bound to, for a service that waited between binding and acting.
 func (k *Call) Recheck() error {
-	_, err := k.b.Peer()
+	_, err := k.Peer()
 	return err
+}
+
+// Peer returns the retained native capture after its binding recheck. The
+// snapshot is read-only; serialized Caller fields supply no identity proof.
+// Peer and Close serialize so evidence cannot be released during the recheck.
+func (k *Call) Peer() (*identity.Peer, error) {
+	if k == nil {
+		return nil, net.ErrClosed
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closed || k.b == nil {
+		return nil, net.ErrClosed
+	}
+	return k.b.Peer()
 }
 
 // Gone closes when the caller hangs up.
@@ -122,6 +140,9 @@ func (k *Call) Gone() <-chan struct{} {
 func (k *Call) Close() error {
 	var err error
 	k.end.Do(func() {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		k.closed = true
 		if k.b != nil {
 			k.b.Close()
 		}

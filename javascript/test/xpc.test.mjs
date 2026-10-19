@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {FrameError, FrameTransport, Status} from '../index.js';
+import {FrameError, FrameTransport as NodeFrameTransport, Status} from '../index.js';
+import {BunFrameTransport} from '../bun.js';
+import net from 'node:net';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+
+const FrameTransport = globalThis.Bun ? BunFrameTransport : NodeFrameTransport;
 
 const service = process.env.OA_XPC_TEST_SERVICE;
 const program = process.env.OA_XPC_TEST_PROGRAM;
@@ -20,7 +26,7 @@ test('Node uses the shared XPC transport for bounded frames', {skip: !enabled}, 
     Uint8Array.from([0, 10, 255]),
     new Uint8Array(128 * 1024).fill(0x78),
   ]) {
-    assert.deepEqual(await transport().exchangeFrame(payload), Buffer.from(payload));
+    assert.deepEqual(new Uint8Array(await transport().exchangeFrame(payload)), payload);
   }
 });
 
@@ -57,4 +63,29 @@ test('Node reports an unregistered XPC service before transfer', {skip: !enabled
     (error) => error instanceof FrameError &&
       error.status === Status.Disconnected && error.transferred === 0,
   );
+});
+
+test('Darwin Unix transport refuses Program proof before application bytes', {skip: !enabled}, async () => {
+  const path = join(tmpdir(), `oa-xpc-weaker-${process.pid}.sock`);
+  let received = 0;
+  const listener = net.createServer(peer => {
+    peer.on('data', bytes => { received += bytes.length; });
+  });
+  await new Promise((resolve, reject) => listener.once('error', reject).listen(path, resolve));
+  try {
+    await assert.rejects(new FrameTransport(path, {timeout: 1000, server})
+      .exchangeFrame(new TextEncoder().encode('must-not-dispatch')),
+    error => error instanceof FrameError && error.status === Status.ProofUnavailable && error.transferred === 0);
+  } finally {
+    await new Promise(resolve => listener.close(resolve));
+  }
+  assert.equal(received, 0);
+});
+
+test('Darwin absent stream endpoint supplies typed initial-open evidence for empty and nonempty requests', {skip: !enabled}, async () => {
+  const path = join(tmpdir(), `oa-xpc-absent-${process.pid}.sock`);
+  for (const payload of [new Uint8Array(), new TextEncoder().encode('request')]) {
+    await assert.rejects(new FrameTransport(path, {timeout: 1000}).exchangeFrame(payload),
+      error => error instanceof FrameError && error.status === Status.OpenIoError && error.transferred === 0);
+  }
 });

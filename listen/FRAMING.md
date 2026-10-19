@@ -1,12 +1,19 @@
 # Explicit bounded frames
 
+`FramedCall.RetainProcess` derives an independently owned native Binding from
+the admitted call under its Close/cancellation lock. Request or pooled-session
+retirement leaves this pin usable. Its consumer closes it and requires Alive,
+the current Peer/Check and the original EvidenceValidUntil for a live lease.
+Historical Peer after exit supplies no live lease. A transport without an
+independent retention primitive refuses; the method never opens a caller PID.
+
 This is a separate byte-stream protocol from legacy newline-delimited endpoints. Providers opt into a distinct framed endpoint. Neither side guesses a format, retries a legacy endpoint, or silently falls back. The payload is opaque; schemas/generated bindings define its meaning.
 
 Each frame is exactly a four-byte unsigned big-endian payload length followed by that many bytes. Length excludes the header. Zero length is valid. Multiline text, NUL and all other byte values are preserved. The wire payload ceiling is `0x3FFFFFFF` bytes; configured maxima above it use that ceiling. Limits apply independently to request and response. The default maximum is 1,048,576 bytes; zero-valued maximum options select that default. Outgoing oversize is refused before connecting or sending; incoming oversize is refused after its fixed header and before payload allocation. EOF inside either header or body is an error. No partial frame reaches a handler.
 
 A single-exchange connection carries one request and at most one response. A client that does not ask for a session opens a fresh connection per call: response correlation is by that connection, not a request identifier. There is no multiplexing, automatic retry, or resending after partial failure. A session (below) carries several such exchanges in sequence on one connection.
 
-## Sessions
+## [Sessions](https://openabstractions.github.io/reference.html#concept-identity.frame-sessions)
 
 Measured 2026-09-17 (`research/inference/MEASURED.txt`): opening and binding a connection is most of a call's cost, about 400 µs on Windows pipes against 34 µs for an exchange on a bound connection. A session keeps the connection for later calls.
 
@@ -16,7 +23,7 @@ Header bits: in a session every header's bit 31 is set. Bit 30 on a request mark
 2. **Requests.** After acceptance the client sends the body. Later requests on the session are one header (bit 31 set) and body. Requests are sequential; bytes sent before the previous response are a protocol violation and end the session.
 3. **Identity.** The server binds the connection once. For every request it rechecks that binding and checks the service's need against it, as `ReceiveFramed` does for a single exchange, before the body is read. An unmet caller-proof requirement produces the terminal refusal below and ends the connection. A request whose body finishes after the binding's maximum age is refused before dispatch. A client verifying its server rechecks the server's evidence before and after each read of every call, as today.
 4. **Responses.** A response header's bit 31 says the session continues; clear, the server closes after the response. A one-way request completes with the header `0x80000000` (or `0x00000000`, closing) and no payload; a payload is an error. An exchange the server does not answer ends the connection, so its client sees EOF as it would on a single exchange.
-5. **Retirement.** A server retires an idle session after `SessionOptions.Idle` (30 s), when its binding reaches `SessionOptions.MaxAge` (five minutes by default and at most five minutes), when captured evidence expires sooner, or to admit a new one beyond `MaxSessions` (64). A reused Windows Authenticode verdict retains its original five-minute deadline. The server sends the closing marker when it has read no byte of a next request. After the marker it dispatches nothing more from that connection. A request that has begun when retirement wins ends with the connection; it receives no marker that could authorize replay. A call accepted before binding expiry may finish its response, then the session retires. A client that reads the marker in place of an answer knows its request was not dispatched and repeats it on a new connection. A client discards a pooled connection that has bytes waiting or has ended, and keeps a connection idle at most 10 s, fewer than four per endpoint and server expectation.
+5. **Retirement.** A server retires an idle session after `SessionOptions.Idle` (30 s), when its binding reaches `SessionOptions.MaxAge` (five minutes by default and at most five minutes), when captured evidence expires sooner, or to admit a new one beyond `MaxSessions` (64). A cancelled exchange counts against `MaxSessions` until its handler returns. A reused Windows Authenticode verdict retains its original five-minute deadline. The server sends the closing marker when it has read no byte of a next request. After the marker it dispatches nothing more from that connection. A request that has begun when retirement wins ends with the connection; it receives no marker that could authorize replay. A call accepted before binding expiry may finish its response, then the session retires. A client that reads the marker in place of an answer knows its request was not dispatched and repeats it on a new connection. A client discards a pooled connection that has bytes waiting or has ended, and keeps a connection idle at most 10 s, fewer than four per endpoint and server expectation.
 6. **Waiting.** Each call keeps its own deadline and cancellation. A call cancelled or expired mid-exchange closes its connection; it is never returned to the pool. A failure after the complete request was written is reported, never retried: acceptance may be unknown, as on a single exchange. An incomplete request write can be retried on a new connection.
 
 Go `Sessions(listener, SessionOptions)` wraps a listener: each exchange arrives from `Accept` as its own `Conn`, and `ReceiveFramed`, `Reply` and `Close` serve it unchanged. A connection whose first byte does not have bit 7 set is delivered unchanged, with that byte replayed. `ReceiveFramed` on a listener without sessions answers a session request with `0x40000000` and serves it once.
@@ -31,7 +38,28 @@ Clients require all six bytes and validate both tokens before reporting caller-p
 
 `ExchangeFrame` sends a request and reads exactly one response frame, then closes its connection. `FramedCall.Reply` sends exactly one response and waits for the client to close, draining Windows writes without an extra acknowledgement byte. The provider must then close the call. A repeated Reply call returns the first result and never emits a second response. Additional request/response frames are unsupported. Trailing bytes received while waiting for EOF are an error; clients do not promise to inspect bytes beyond the first complete exchange response.
 
+Go calls through an explicit custom `FrameClient.Dialer` classify delivery
+failures through `errors.Is`: `ErrRequestNotSent` proves failure before any
+application-frame write attempt; `ErrRequestUncertain` means a write was
+attempted and no authoritative answer arrived. Zero-byte failed writes,
+partial writes, cancellation, timeouts and lost or malformed transport replies
+remain uncertain. Complete caller-proof refusals keep their existing type.
+The underlying error and context cause remain available. Absence of either
+marker proves nothing about delivery, including errors decoding a returned
+application reply. A complete response frame is returned opaquely to generated
+decoding even when cancellation races its final bytes; cancellation after that
+completion cannot discard an authoritative service answer. An incomplete or
+failed read remains uncertain. These classifications grant no replay permission and add no
+retry. Native, session and message transports retain their existing errors.
+
 ## APIs and lifetime
+
+`FramedCall.MatchStartedProcess` composes ID-M5's live launched-occurrence and
+trusted sealed-generation check with the actual native message this call owns.
+It synchronizes with call Close and checks cancellation/message completion
+before returning. It exposes no raw XPC request and changes no Caller proof.
+Streams and message transports without that native operation return
+`identity.ErrNoBinding`; they do not infer process identity from frame DATA.
 
 ### macOS message endpoints
 
@@ -80,15 +108,57 @@ equivalent runtime evidence.
 
 `ListenFramed(endpoint, need)` checks the selected transport's identity ceiling
 before opening the listener. `CanEver(endpoint, need)` performs that check alone.
-Both use the common `identity.Limits.CanEver` comparison. Unsupported transports
+Both use the common [`identity.Limits.CanEver`](https://openabstractions.github.io/reference.html#concept-identity.proof-limits) comparison. Unsupported transports
 and unavailable evidence are explicit errors. Each received request still uses
 `Binding.Check`; a startup check cannot establish an individual caller's identity.
 Legacy `identity.CanEver(need)` continues to describe the default stream transport.
 
 C++ `<abstraction/ipc/frame.hpp>` supplies `FrameTransport(endpoint, timeout_ms=5000, max_frame=1048576)`. `write_frame(std::string_view)` and `exchange_frame(std::string_view)` use the existing shared C ABI underneath; the former fits generated templated client transports. Errors throw `FrameError` with its transport `Status`; size failures use invalid_argument. A zero C++ timeout expires immediately. No C++ listener implementation is added.
 
+Ordinary native bindings require `OA_IPC_FEATURE_SINGLE_EXCHANGE=4` and select
+`OA_IPC_CALL_SINGLE_EXCHANGE=2` on ABI-1 `oa_ipc_session_call`, combined with the
+existing one-way flag when needed. The shared native single-exchange path owns
+framing, response allocation bounds, proof refusal, deadline and cancellation.
+It opens a fresh connection before consulting any session pool and never
+negotiates or replays that call. Explicit sessions and XPC retain their existing
+semantics. Older native libraries lacking the feature are refused before I/O.
+The ABI's confirmed `sent` count excludes the header: zero cannot prove an empty
+request was not delivered. Empty-request failure remains acceptance-unknown and
+does not permit activation or resend. The native ABI reports caller-proof
+refusal as `ProofUnavailable`; it exposes no attribute/required-proof detail
+tokens to language wrappers.
+
+The optional native `OA_IPC_FEATURE_OPEN_FAILURE=8` supports flag
+`OA_IPC_CALL_REPORT_OPEN_FAILURE=4`: a confirmed initial stream-open I/O failure
+before any protocol write attempt returns `OA_IPC_OPEN_IO_ERROR=10`. Existing
+flags retain statuses 0..9. Once the call has attempted negotiation or any
+write, or used a pooled connection, subsequent opens cannot acquire that status.
+XPC supplies no such classification. Facade's automatic cold-start path uses
+this affirmative phase evidence; zero transferred bytes supplies no permission
+to activate or replay. Older libraries can still perform supported exchanges
+without supplying open-phase evidence.
+
 Go `FrameClient{Endpoint, Timeout, MaxFrame}` has `WriteFrame`, `ExchangeFrame`, and context variants `WriteFrameContext`/`ExchangeFrameContext`. A zero Go Timeout selects five seconds; a negative duration expires immediately. Context and configured timeout share the earliest deadline. That one budget spans dialing, sending, response reading and EOF completion; it never restarts per read. Cancellation closes connections and unblocks platform I/O. The Windows framed dialer retries a busy pipe under that context; existing Dial retains its legacy behavior. Native endpoint spelling remains subject to the byte runtime's platform rules (C++ Windows ASCII local pipes; Go local Windows pipes).
 
 `ReceiveFramed(ctx, conn, need, maxFrame)` takes ownership of an accepted identity connection. It returns either an authenticated `FramedCall` or nil plus an error, closing the connection on failure. It uses the context's deadline, or five seconds when absent. After reading only the fixed header (needed by Windows identity binding), it calls existing Bind and Check against the supplied need before allocating/reading the payload. It makes no stronger identity claim than those checks. Malformed, truncated, expired and identity-refused requests never expose a frame.
 
-The call exposes immutable Frame and Caller, plus Recheck, Reply and Close. Close is idempotent and releases both binding and connection. A context cancellation closes the call; binding checks and resource release are serialized. A service that delays action should Recheck and honor its own context. Cancellation cannot preempt arbitrary application handler work. Callers must not mutate Frame/Caller or perform multiple concurrent Reply operations with different intended responses. The framing layer does not authorize capabilities or declare provider persistence.
+The call exposes immutable Frame and Caller, plus Recheck, Reply and Close. Close is idempotent and releases both binding and connection. A context cancellation ends the call's I/O. A single-exchange call closes as before. A session exchange then refuses Read, Write and SetDeadline but keeps its session, binding and `MaxSessions` slot until Close, which the handler makes when it returns (IPC-A11); its peer sees the connection end at that Close. [Binding](https://openabstractions.github.io/reference.html#concept-identity.peer-binding) checks and resource release are serialized. A service that delays action should Recheck and honor its own context. Cancellation cannot preempt arbitrary application handler work. Callers must not mutate Frame/Caller or perform multiple concurrent Reply operations with different intended responses. The framing layer does not authorize capabilities or declare provider persistence.
+
+### Caller-owned byte streams
+
+Python `abstraction.ipc.stream.read_frame_from(read, limit=1048576)` and
+`write_frame_to(write, frame, limit=1048576)` share the same IPC-F1 four-byte
+big-endian length and bounded body. The callbacks read at most the requested
+byte count and report each write's accepted count. JavaScript
+`@openabstractions/ipc/stream` supplies asynchronous `readFrameFrom` and
+`writeFrameTo` with those callback shapes; `framesFrom` adapts an async byte
+iterable to the same reader. Helpers return `None`/`null` only for clean EOF
+before a new header, preserving an empty body as bytes. Partial headers/bodies,
+invalid progress and oversized bodies fail. The complete outgoing body is
+checked before writing any header byte. The default limit is generated IPC-F1's
+1 MiB; explicit limits obey the existing generated client ceiling.
+
+These helpers supply byte framing on I/O already owned and authenticated by the
+caller. That owner serializes outgoing frames, supplies cancellation/deadlines,
+and retires the channel after an error. A partial transfer never permits replay.
+The helpers open no endpoint, activate no runtime and make no identity claim.

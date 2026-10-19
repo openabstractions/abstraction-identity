@@ -1119,3 +1119,173 @@ func TestSessionClosesWhenIdleDeadlineCannotBeSet(t *testing.T) {
 		t.Fatalf("deadline failure: reads=%d closed=%t retained=%d", pc.reads, pc.closed, len(l.sessions))
 	}
 }
+
+// TestCancelledSessionCallHoldsItsSlotUntilHandlerReturns is IPC-A11: a call
+// whose context ends keeps its session slot while its handler still runs, so
+// 10,000 open-and-close cycles never hold more session handlers than the limit.
+func TestCancelledSessionCallHoldsItsSlotUntilHandlerReturns(t *testing.T) {
+	const limit, cycles = 4, 10000
+	endpoint := framedEndpoint(t)
+	inner, err := Listen(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := Sessions(inner, SessionOptions{MaxSessions: limit})
+	release := make(chan struct{})
+	var held, peak, reached atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer c.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				k, err := ReceiveFramed(ctx, c, framingNeed, 0)
+				cancel()
+				if err != nil {
+					return
+				}
+				defer k.Close()
+				if _, ok := c.(*sessionCall); !ok {
+					return
+				}
+				reached.Add(1)
+				n := held.Add(1)
+				for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+				}
+				defer held.Add(-1)
+				<-release
+			}()
+		}
+	}()
+	t.Cleanup(func() { close(release); l.Close(); wg.Wait() })
+	for i := 0; i < cycles && peak.Load() <= limit; i++ {
+		conn, err := dialFramed(context.Background(), endpoint)
+		if err != nil {
+			t.Fatalf("cycle %d: %v", i, err)
+		}
+		conn.SetDeadline(time.Now().Add(3 * time.Second))
+		if err := writeUint32(conn, sessionFlag|1); err == nil {
+			if _, _, err := readUint32(conn); err == nil {
+				conn.Write([]byte("a"))
+			}
+		}
+		conn.Close()
+	}
+	if got := peak.Load(); got > limit {
+		t.Fatalf("cancelled calls freed their slots: %d session handlers ran at once, limit %d", got, limit)
+	}
+	if reached.Load() == 0 {
+		t.Fatal("no session call reached its handler")
+	}
+}
+
+// TestCancelledSessionCallReleasesItsSlotAtHandlerReturn is IPC-A11's release
+// side: the aborted call's client sees no EOF while its handler runs, a second
+// session is declined, and after the handler returns the client reads EOF and
+// a new session is accepted.
+func TestCancelledSessionCallReleasesItsSlotAtHandlerReturn(t *testing.T) {
+	endpoint := framedEndpoint(t)
+	inner, err := Listen(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := Sessions(inner, SessionOptions{MaxSessions: 1})
+	release := make(chan struct{})
+	holding := make(chan struct{}, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer c.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				k, err := ReceiveFramed(ctx, c, framingNeed, 0)
+				cancel()
+				if err != nil {
+					return
+				}
+				defer k.Close()
+				holding <- struct{}{}
+				<-release
+			}()
+		}
+	}()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+		l.Close()
+		wg.Wait()
+	})
+	open := func() (net.Conn, uint32) {
+		t.Helper()
+		conn, err := dialFramed(context.Background(), endpoint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.SetDeadline(time.Now().Add(3 * time.Second))
+		if err := writeUint32(conn, sessionFlag|1); err != nil {
+			t.Fatal(err)
+		}
+		ack, _, err := readUint32(conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return conn, ack
+	}
+	first, ack := open()
+	defer first.Close()
+	if ack != sessionAccept {
+		t.Fatalf("first session ack %#x", ack)
+	}
+	first.Write([]byte("a"))
+	select {
+	case <-holding:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first call was not delivered")
+	}
+	first.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if n, err := first.Read(make([]byte, 1)); n != 0 || !os.IsTimeout(err) {
+		t.Fatalf("aborted call ended before its handler returned: n=%d err=%v", n, err)
+	}
+	second, ack := open()
+	second.Close()
+	if ack != sessionDecline {
+		t.Fatalf("second session while slot held: ack %#x, want decline", ack)
+	}
+	close(release)
+	released = true
+	first.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if n, err := first.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+		t.Fatalf("aborted call after handler return: n=%d err=%v, want EOF", n, err)
+	}
+	var third net.Conn
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		third, ack = open()
+		third.Close()
+		if ack == sessionAccept || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ack != sessionAccept {
+		t.Fatalf("slot not released at handler return: ack %#x", ack)
+	}
+}

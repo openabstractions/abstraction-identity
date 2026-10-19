@@ -2,6 +2,8 @@
 #ifdef __linux__
 #include "local_stream.h"
 #include <abstraction/ipc/client.h>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <map>
 #include <vector>
@@ -12,6 +14,23 @@
 extern char **environ;
 
 namespace abstraction::ipc_internal::linux_selection {
+// Linux's original clone3 UAPI is eight aligned u64 fields (64 bytes).
+// Keep that ABI available when the build sysroot predates its declarations.
+struct alignas(8) CloneArgsV0 {
+    uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls;
+};
+static_assert(sizeof(CloneArgsV0)==64 && alignof(CloneArgsV0)==8);
+static_assert(offsetof(CloneArgsV0,pidfd)==8 && offsetof(CloneArgsV0,exit_signal)==32 &&
+    offsetof(CloneArgsV0,tls)==56);
+#ifdef SYS_clone3
+inline constexpr long clone3_number=SYS_clone3;
+#elif (defined(__x86_64__) && !defined(__ILP32__)) || defined(__aarch64__)
+inline constexpr long clone3_number=435; // Linux x86-64 and asm-generic UAPI.
+#else
+inline constexpr long clone3_number=-1;
+#endif
+inline constexpr idtype_t pidfd_wait=static_cast<idtype_t>(3); // Linux P_PIDFD UAPI.
+
 inline oa_ipc_status budget(local_stream::Deadline deadline, local_stream::Cancellation* cancel) {
     if(cancel && cancel->requested())return OA_IPC_CANCELLED;
     return local_stream::Clock::now()>=deadline?OA_IPC_TIMEOUT:OA_IPC_OK;
@@ -27,7 +46,7 @@ struct Child {
             pollfd stopped{handle,POLLIN,0};
             while(::poll(&stopped,1,-1)<0 && errno==EINTR) {}
             siginfo_t info{};
-            while(::waitid(P_PIDFD,handle,&info,WEXITED)<0 && errno==EINTR) {}
+            while(::waitid(pidfd_wait,handle,&info,WEXITED)<0 && errno==EINTR) {}
             ::close(handle);
         }
     }
@@ -37,6 +56,7 @@ inline oa_ipc_status run_owned(std::string& out,int& exit_code,local_stream::Dea
     local_stream::Cancellation* cancel,const char* executable,const std::vector<std::string>& arguments,
     int executable_fd=-1,bool require_eof=true,bool discard_overflow=false) {
     auto state=budget(deadline,cancel);if(state!=OA_IPC_OK)return state;
+    if(clone3_number<0)return OA_IPC_PROOF_UNAVAILABLE;
     int pipes[2];if(::pipe2(pipes,O_CLOEXEC))return OA_IPC_IO_ERROR;
     if(::fcntl(pipes[0],F_SETFL,O_NONBLOCK)<0){::close(pipes[0]);::close(pipes[1]);return OA_IPC_IO_ERROR;}
     for(int& fd:pipes)if(fd<=STDERR_FILENO) {
@@ -49,10 +69,10 @@ inline oa_ipc_status run_owned(std::string& out,int& exit_code,local_stream::Dea
     args.push_back(const_cast<char*>(executable));
     for(const auto& argument:arguments)args.push_back(const_cast<char*>(argument.c_str()));
     args.push_back(nullptr);
-    clone_args options{};
+    CloneArgsV0 options{};
     options.flags=CLONE_PIDFD;options.exit_signal=SIGCHLD;
     options.pidfd=reinterpret_cast<uint64_t>(&child.handle);
-    const auto spawned=::syscall(SYS_clone3,&options,sizeof options);
+    const auto spawned=::syscall(clone3_number,&options,sizeof options);
     if(spawned==0) {
         if(::dup2(pipes[1],STDOUT_FILENO)<0 || ::dup2(pipes[1],STDERR_FILENO)<0)::_exit(127);
         ::close(pipes[0]);::close(pipes[1]);
@@ -76,7 +96,7 @@ inline oa_ipc_status run_owned(std::string& out,int& exit_code,local_stream::Dea
             else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return OA_IPC_IO_ERROR;
         }
         siginfo_t info{};
-        if(::waitid(P_PIDFD,child.handle,&info,WEXITED|WNOHANG|WNOWAIT)<0) {
+        if(::waitid(pidfd_wait,child.handle,&info,WEXITED|WNOHANG|WNOWAIT)<0) {
             if(errno==EINTR)continue;
             return OA_IPC_IO_ERROR;
         }

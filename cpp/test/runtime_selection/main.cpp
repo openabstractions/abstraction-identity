@@ -1,3 +1,6 @@
+#ifdef ABSTRACTION_IPC_TEST_LEGACY_LINUX_UAPI
+#include "legacy_linux_uapi.h"
+#endif
 #include <abstraction/ipc/client.h>
 #include <abstraction/ipc/bootstrap.hpp>
 #include "../../src/runtime_selection.h"

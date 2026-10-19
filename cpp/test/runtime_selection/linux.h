@@ -3,6 +3,13 @@
 #include <thread>
 #include <iostream>
 #include <cassert>
+#if defined(CLONE_ARGS_SIZE_VER0) && defined(SYS_clone3)
+using SelectionCloneArgsV0=abstraction::ipc_internal::linux_selection::CloneArgsV0;
+static_assert(offsetof(SelectionCloneArgsV0,pidfd)==offsetof(clone_args,pidfd));
+static_assert(offsetof(SelectionCloneArgsV0,exit_signal)==offsetof(clone_args,exit_signal));
+static_assert(offsetof(SelectionCloneArgsV0,tls)==offsetof(clone_args,tls));
+static_assert(abstraction::ipc_internal::linux_selection::clone3_number==SYS_clone3);
+#endif
 inline void selection_reaper(int) {
     int saved=errno,status;
     while(::waitpid(-1,&status,WNOHANG)>0) {}

@@ -307,6 +307,9 @@ func (c FrameClient) connect(ctx context.Context) (net.Conn, func(), error) {
 	return guard, func() { stop(); guard.Close() }, nil
 }
 func (c FrameClient) WriteFrameContext(parent context.Context, frame []byte) error {
+	if err := checkOutgoing(parent, frame); err != nil {
+		return err
+	}
 	if c.Dialer != nil {
 		_, err := c.customFrameCall(parent, frame, true)
 		return err
@@ -346,6 +349,9 @@ func (c FrameClient) sessions(length int) bool {
 		!frames.isSingle(c.poolKey(), time.Now())
 }
 func (c FrameClient) ExchangeFrameContext(parent context.Context, frame []byte) ([]byte, error) {
+	if err := checkOutgoing(parent, frame); err != nil {
+		return nil, err
+	}
 	if c.Dialer != nil {
 		return c.customFrameCall(parent, frame, false)
 	}

@@ -52,6 +52,9 @@ func TestFileIDScenarios(t *testing.T) {
 				steps = append(steps, line)
 			}
 			d := newFileIDDriver(t)
+			// Relative Self paths start on the scenario's local volume. The
+			// source checkout can be a refused mounted volume under WSL.
+			t.Chdir(d.dir)
 			for _, s := range steps {
 				if strings.HasPrefix(s, "keep ") && d.volatile != "" {
 					t.Skip("keep needs a workdir whose file IDs survive a reboot (DRIVER.md): " + d.volatile)

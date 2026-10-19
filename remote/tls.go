@@ -21,15 +21,31 @@ const Transport = "oa-framed-mtls@1"
 
 var ErrTrust = errors.New("remote: authentication or trust configuration refused")
 
+// Dialer supplies explicit TLS trust and per-call admission for frame clients.
+// Keep certificate keys and callbacks immutable while its clients are in use.
+type Dialer struct {
+	TLS          *tls.Config
+	Timeout      time.Duration
+	MaxFrame     uint32
+	Admit        func(Peer) error
+	AdmitContext func(context.Context, Peer) error
+}
+
 // Client returns the ordinary shared framing client over an authenticated TLS
 // dialer. Registration supplies address, ServerName, trust roots and client key.
-// Keep certificate keys and callbacks immutable while this client is in use.
 // No endpoint discovery, system-root fallback, redirect or retry occurs here.
 func Client(address string, config *tls.Config, timeout time.Duration, maxFrame uint32, admit func(Peer) error) (listen.FrameClient, error) {
+	return (Dialer{TLS: config, Timeout: timeout, MaxFrame: maxFrame, Admit: admit}).Client(address)
+}
+
+// Client builds the frame client. Admission retains each dial's caller context;
+// both admission callbacks must accept when both are configured.
+func (d Dialer) Client(address string) (listen.FrameClient, error) {
+	config, timeout, maxFrame := d.TLS, d.Timeout, d.MaxFrame
 	if _, _, err := net.SplitHostPort(address); err != nil {
 		return listen.FrameClient{}, fmt.Errorf("%w: explicit host:port required", ErrTrust)
 	}
-	if admit == nil || config == nil || config.InsecureSkipVerify || config.ServerName == "" || config.RootCAs == nil ||
+	if (d.Admit == nil && d.AdmitContext == nil) || config == nil || config.InsecureSkipVerify || config.ServerName == "" || config.RootCAs == nil ||
 		(len(config.Certificates) == 0 && config.GetClientCertificate == nil) {
 		return listen.FrameClient{}, fmt.Errorf("%w: server name, roots and client credential required", ErrTrust)
 	}
@@ -37,7 +53,6 @@ func Client(address string, config *tls.Config, timeout time.Duration, maxFrame 
 	c.RootCAs = config.RootCAs.Clone()
 	c.MinVersion = tls.VersionTLS13
 	c.NextProtos = []string{Protocol}
-	verifyAdmission(c, admit)
 	// A fresh handshake rechecks the configured certificate trust on every call.
 	c.ClientSessionCache = nil
 	if c.MaxVersion != 0 && c.MaxVersion < c.MinVersion {
@@ -47,11 +62,24 @@ func Client(address string, config *tls.Config, timeout time.Duration, maxFrame 
 		if selected != address {
 			return nil, fmt.Errorf("%w: endpoint differs from trusted registration", ErrTrust)
 		}
+		limit := timeout
+		if limit == 0 {
+			limit = listen.DefaultFrameTimeout
+		}
+		ctx, cancel := context.WithTimeout(ctx, limit)
+		defer cancel()
+		selectedTLS := c.Clone()
+		if d.Admit != nil {
+			verifyAdmission(selectedTLS, d.Admit)
+		}
+		if d.AdmitContext != nil {
+			verifyAdmission(selectedTLS, func(peer Peer) error { return d.AdmitContext(ctx, peer) })
+		}
 		raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
 		if err != nil {
 			return nil, err
 		}
-		conn := tls.Client(raw, c)
+		conn := tls.Client(raw, selectedTLS)
 		if deadline, ok := ctx.Deadline(); ok {
 			if err = conn.SetDeadline(deadline); err != nil {
 				raw.Close()

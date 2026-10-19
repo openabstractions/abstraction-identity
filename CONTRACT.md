@@ -102,8 +102,8 @@ An adopter with a privileged half routes its OA calls through its per-user
 process; 0.8 has no machine-service client (TD47). A peer off the machine
 is outside the trust domain as well: locally it is `ErrRemotePeer`
 (`ID-E2`), and a remote runtime is reached with certificate evidence under
-abstraction-ipc's remote binding ([abstraction-ipc
-CONTRACT.md](../abstraction-ipc/CONTRACT.md), its "Trust domain" line,
+abstraction-ipc's remote binding (abstraction-ipc
+CONTRACT.md (`../abstraction-ipc/CONTRACT.md`), its "Trust domain" line,
 states the transport's half).
 
 ## Proof

@@ -26,7 +26,11 @@ type Server struct {
 	Handler Handler
 	// Admit checks the verified leaf SPKI against the owner's live pin policy.
 	// It runs during the TLS handshake, before the request frame is read.
+	// New hosts use AdmitContext to retain the handshake's caller deadline.
 	Admit func(Peer) error
+	// AdmitContext checks the same live pin policy within this connection's
+	// handshake context. When both callbacks are set, both must admit the peer.
+	AdmitContext func(context.Context, Peer) error
 	// ClientRoots, when non-nil, overrides only ClientCAs for each connection.
 	// Return an immutable snapshot and honor the remaining handshake context.
 	// The server clones the pool. Nil/error/cancellation refuses; fixed roots
@@ -52,7 +56,7 @@ type Server struct {
 // The live Admit policy is evaluated again during each TLS handshake.
 func (s Server) Validate() error {
 	if s.TLS == nil || s.TLS.ClientCAs == nil || s.TLS.GetConfigForClient != nil ||
-		(len(s.TLS.Certificates) == 0 && s.TLS.GetCertificate == nil) || s.Handler == nil || s.Admit == nil ||
+		(len(s.TLS.Certificates) == 0 && s.TLS.GetCertificate == nil) || s.Handler == nil || (s.Admit == nil && s.AdmitContext == nil) ||
 		s.Timeout < 0 || s.MaxConnections < 0 || s.HandshakeTimeout < 0 ||
 		s.MaxSourceConnections < 0 || s.MaxPeerCalls < 0 || s.PeerRequestsPerSecond < 0 || s.PeerBurst < 0 {
 		return fmt.Errorf("%w: fixed server identity, client roots, handler and valid limits required", ErrTrust)
@@ -80,7 +84,9 @@ func (s Server) Serve(parent context.Context, listener net.Listener) error {
 	c.MinVersion = tls.VersionTLS13
 	c.NextProtos = []string{Protocol}
 	c.SessionTicketsDisabled = true
-	verifyAdmission(c, s.Admit)
+	if s.Admit != nil {
+		verifyAdmission(c, s.Admit)
+	}
 	if s.Timeout == 0 {
 		s.Timeout = listen.DefaultFrameTimeout
 	}
@@ -132,6 +138,11 @@ func (s Server) serveCall(parent context.Context, raw net.Conn, config *tls.Conf
 	defer raw.Close()
 	handshake, finishHandshake := context.WithDeadline(ctx, accepted.Add(s.HandshakeTimeout))
 	defer finishHandshake()
+	if s.AdmitContext != nil {
+		selected := config.Clone()
+		verifyAdmission(selected, func(peer Peer) error { return s.AdmitContext(handshake, peer) })
+		config = selected
+	}
 	if s.ClientRoots != nil {
 		roots, err := s.ClientRoots(handshake)
 		if err != nil || roots == nil || handshake.Err() != nil {

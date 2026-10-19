@@ -30,6 +30,14 @@ import (
 //
 // legacyDial is the call Dial used to make. It is the control: the same server,
 // the same probes, one flag apart.
+//
+// Reading the level is what identity itself does: impersonate, open the thread
+// token for TOKEN_QUERY, revert. The use probes go further. Under the old
+// dialer they open a file as the caller and mint a primary token from its
+// token, which is token theft carried out for real. Windows Defender
+// quarantined this test binary on 2026-11-23 (Behavior:Win32/DefenseEvasion.A!ml)
+// in a run that included them. They run only where tokenUseProbeOptIn is 1,
+// which the hosted CI runners set; elsewhere their test reports itself skipped.
 
 const (
 	serverEnv = "LISTEN_SQOS_SERVER"
@@ -37,6 +45,8 @@ const (
 
 	serverFailed = 4
 	probeFrame   = "who am I to you"
+
+	tokenUseProbeOptIn = "OA_IDENTITY_TOKEN_USE_PROBES"
 )
 
 // report is what the server process saw. It travels as one JSON line on the
@@ -108,11 +118,12 @@ func runServer(name string) int {
 	return 0
 }
 
-// probeLevel impersonates the client and, while wearing whatever it was given,
-// tries the two things impersonation authority is for: reaching an object as
-// the client, and minting a primary token to run code as the client. The
-// thread is locked and reverted the way identity.withPeerToken does it, for the
-// same reason: a goroutine that moves threads leaves one wearing the client.
+// probeLevel impersonates the client and reads the level it was given. When
+// the parent passed a probe file it also tries the two things impersonation
+// authority is for: reaching an object as the client, and minting a primary
+// token to run code as the client. The thread is locked and reverted the way
+// identity.withPeerToken does it, for the same reason: a goroutine that moves
+// threads leaves one wearing the client.
 func probeLevel(pipe syscall.Handle, r *report) {
 	done := make(chan struct{})
 	go func() {
@@ -131,8 +142,13 @@ func probeLevel(pipe syscall.Handle, r *report) {
 			r.LevelWhy = "GetCurrentThread: " + err.Error()
 			return
 		}
+		probe := os.Getenv(probeEnv)
+		access := uint32(windows.TOKEN_QUERY)
+		if probe != "" {
+			access |= windows.TOKEN_DUPLICATE
+		}
 		var tok windows.Token
-		if err := windows.OpenThreadToken(th, windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE, true, &tok); err != nil {
+		if err := windows.OpenThreadToken(th, access, true, &tok); err != nil {
 			r.LevelWhy = "OpenThreadToken: " + err.Error()
 			return
 		}
@@ -145,19 +161,20 @@ func probeLevel(pipe syscall.Handle, r *report) {
 			return
 		}
 
-		if f := os.Getenv(probeEnv); f != "" {
-			p, err := windows.UTF16PtrFromString(f)
-			if err != nil {
-				r.OpenErr = err.Error()
+		if probe == "" {
+			return
+		}
+		p, err := windows.UTF16PtrFromString(probe)
+		if err != nil {
+			r.OpenErr = err.Error()
+		} else {
+			h, err := windows.CreateFile(p, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil,
+				windows.OPEN_EXISTING, 0, 0)
+			if err == nil {
+				r.Opened = true
+				windows.CloseHandle(h)
 			} else {
-				h, err := windows.CreateFile(p, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil,
-					windows.OPEN_EXISTING, 0, 0)
-				if err == nil {
-					r.Opened = true
-					windows.CloseHandle(h)
-				} else {
-					r.OpenErr, r.OpenErrno = err.Error(), errnoOf(err)
-				}
+				r.OpenErr, r.OpenErrno = err.Error(), errnoOf(err)
 			}
 		}
 
@@ -189,21 +206,24 @@ func legacyDial(name string) (*os.File, error) { return os.OpenFile(name, os.O_R
 
 // serve starts this binary as a server, waits for it to say it is listening,
 // dials it with the given dialer, sends one frame and reads back what the
-// server saw.
-func serve(t *testing.T, dial func(string) (io.ReadWriteCloser, error)) report {
+// server saw. With use set, the server also runs the use probes.
+func serve(t *testing.T, dial func(string) (io.ReadWriteCloser, error), use bool) report {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe := filepath.Join(t.TempDir(), "a-file-of-the-caller")
-	if err := os.WriteFile(probe, []byte("the client's own file\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	name := fmt.Sprintf(`\\.\pipe\openabstractions-test-%d-%s`, os.Getpid(), t.Name())
 	cmd := exec.Command(exe)
-	cmd.Env = append(os.Environ(), serverEnv+"="+name, probeEnv+"="+probe)
+	cmd.Env = append(os.Environ(), serverEnv+"="+name)
+	if use {
+		probe := filepath.Join(t.TempDir(), "a-file-of-the-caller")
+		if err := os.WriteFile(probe, []byte("the client's own file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd.Env = append(cmd.Env, probeEnv+"="+probe)
+	}
 	cmd.Stderr = os.Stderr
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -244,17 +264,41 @@ func serve(t *testing.T, dial func(string) (io.ReadWriteCloser, error)) report {
 func dialed(name string) (io.ReadWriteCloser, error)       { return Dial(name) }
 func dialedLegacy(name string) (io.ReadWriteCloser, error) { return legacyDial(name) }
 
-// TestTheServerIsGivenIdentificationOnly is acceptance (1) and (3) together,
-// with the old dialer beside it as the control.
+// TestTheServerIsGivenIdentificationOnly is acceptance (1), with the old dialer
+// beside it as the control.
 //
 // Level 2 is SecurityImpersonation - the server may act as the caller. Level 1
 // is SecurityIdentification - it may read who the caller is and nothing more.
-// The two probes are the difference stated as behaviour rather than as a
-// number: an object opened as the caller, and a primary token that would run
-// code as the caller. Both are refused with ERROR_BAD_IMPERSONATION_LEVEL at
-// level 1, which is the proof the authority is gone and not merely unused.
 func TestTheServerIsGivenIdentificationOnly(t *testing.T) {
-	before := serve(t, dialedLegacy)
+	before := serve(t, dialedLegacy, false)
+	t.Logf("the old dialer: level %d (%s)", before.Level, levelName(before.Level))
+	if before.Level != windows.SecurityImpersonation {
+		t.Fatalf("the control is not the defect: the old dialer granted level %d, want %d",
+			before.Level, windows.SecurityImpersonation)
+	}
+
+	now := serve(t, dialed, false)
+	t.Logf("Dial: level %d (%s)", now.Level, levelName(now.Level))
+	if now.LevelWhy != "" {
+		t.Fatalf("the server could not read the level it was given: %s", now.LevelWhy)
+	}
+	if now.Level != windows.SecurityIdentification {
+		t.Fatalf("Dial granted the server level %d (%s), want %d (identification)",
+			now.Level, levelName(now.Level), windows.SecurityIdentification)
+	}
+}
+
+// TestIdentificationLevelCannotActAsTheCaller is acceptance (3): the level
+// stated as behaviour rather than as a number. The two probes are an object
+// opened as the caller and a primary token that would run code as the caller.
+// Both are refused with ERROR_BAD_IMPERSONATION_LEVEL at level 1, which is the
+// proof the authority is gone and not merely unused. The control mints the
+// primary token for real, so this runs only where tokenUseProbeOptIn is 1.
+func TestIdentificationLevelCannotActAsTheCaller(t *testing.T) {
+	if os.Getenv(tokenUseProbeOptIn) != "1" {
+		t.Skipf("the token use probes run on the hosted CI runners; set %s=1 to run them here", tokenUseProbeOptIn)
+	}
+	before := serve(t, dialedLegacy, true)
 	t.Logf("the old dialer: level %d (%s), opened the caller's file %v, minted a primary token %v",
 		before.Level, levelName(before.Level), before.Opened, before.Primary)
 	if before.Level != windows.SecurityImpersonation {
@@ -266,7 +310,7 @@ func TestTheServerIsGivenIdentificationOnly(t *testing.T) {
 			"the probes are wrong, not the dialer", before.Opened, before.OpenErr, before.Primary, before.PrimErr)
 	}
 
-	now := serve(t, dialed)
+	now := serve(t, dialed, true)
 	t.Logf("Dial: level %d (%s), opened the caller's file %v (%s), minted a primary token %v (%s)",
 		now.Level, levelName(now.Level), now.Opened, now.OpenErr, now.Primary, now.PrimErr)
 	if now.LevelWhy != "" {
@@ -298,8 +342,8 @@ func TestTheServerIsGivenIdentificationOnly(t *testing.T) {
 // every answer must be the answer it was before, from the same process
 // boundary, over a connection that granted one level less.
 func TestIdentityStillBindsAcrossTheChangedDialer(t *testing.T) {
-	before := serve(t, dialedLegacy)
-	now := serve(t, dialed)
+	before := serve(t, dialedLegacy, false)
+	now := serve(t, dialed, false)
 
 	if now.Receive != "" {
 		t.Fatalf("the caller was not bound and checked: %s", now.Receive)
@@ -344,7 +388,7 @@ func TestIdentityStillBindsAcrossTheChangedDialer(t *testing.T) {
 // test: identification level is normal capability information, not a shortfall.
 // Nothing may downgrade a proof for it, and Check against Program must pass.
 func TestWhatIdentificationLevelIsReportedAs(t *testing.T) {
-	now := serve(t, dialed)
+	now := serve(t, dialed, false)
 	if now.Receive != "" {
 		t.Fatalf("Check(Program) failed over a connection at identification level: %s", now.Receive)
 	}

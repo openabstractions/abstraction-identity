@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -91,6 +92,42 @@ func write(t *testing.T, name string) string {
 	return name
 }
 
+// distinctNameFiles builds the two physical files required by the Unicode
+// rows. The volume decides whether it can hold both spellings. A collision
+// skips only when native file identity confirms the spellings are aliases.
+func distinctNameFiles(a, b string) (fixture, skip, error) {
+	if err := os.WriteFile(a, []byte("fixture"), 0o644); err != nil {
+		return fixture{}, "", err
+	}
+	f, createErr := os.OpenFile(b, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if createErr != nil && !errors.Is(createErr, fs.ErrExist) {
+		return fixture{}, "", createErr
+	}
+	if f != nil {
+		if err := f.Close(); err != nil {
+			return fixture{}, "", err
+		}
+	}
+	left, err := os.Stat(a)
+	if err != nil {
+		return fixture{}, "", err
+	}
+	right, err := os.Stat(b)
+	if err != nil {
+		return fixture{}, "", err
+	}
+	if os.SameFile(left, right) {
+		if errors.Is(createErr, fs.ErrExist) {
+			return fixture{}, skip(fmt.Sprintf("volume aliases %q and %q; this row requires distinct files", a, b)), nil
+		}
+		return fixture{}, "", fmt.Errorf("exclusive creation of %q produced the same file as %q", b, a)
+	}
+	if createErr != nil {
+		return fixture{}, "", createErr
+	}
+	return fixture{a: a, b: b}, "", nil
+}
+
 func build(t *testing.T, c placetest.Case) (fixture, skip) {
 	root, err := placetest.Root(t.TempDir())
 	if err != nil {
@@ -129,9 +166,17 @@ func build(t *testing.T, c placetest.Case) (fixture, skip) {
 	case "names":
 		return fixture{a: filepath.Join(root, "Model.gguf"), b: filepath.Join(root, "model.gguf")}, ""
 	case "kelvin":
-		return fixture{a: write(t, filepath.Join(root, "Kelvin")), b: write(t, filepath.Join(root, "kelvin"))}, ""
+		f, why, err := distinctNameFiles(filepath.Join(root, "Kelvin"), filepath.Join(root, "kelvin"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f, why
 	case "nfc-nfd":
-		return fixture{a: write(t, filepath.Join(root, "café")), b: write(t, filepath.Join(root, "café"))}, ""
+		f, why, err := distinctNameFiles(filepath.Join(root, "café"), filepath.Join(root, "café"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f, why
 	case "junction":
 		target := filepath.Join(root, "target folder")
 		f := write(t, filepath.Join(target, "file.txt"))

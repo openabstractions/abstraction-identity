@@ -14,24 +14,22 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// copyTestBinary copies the running test binary to dir/name, so a child
-// server process can be launched from a chosen spelling of a path, and
-// returns the copy's absolute path.
-func copyTestBinary(t *testing.T, dir, name string) string {
+// longSpelling returns the long spelling of an existing path.
+func longSpelling(t *testing.T, path string) string {
 	t.Helper()
-	self, err := os.Executable()
+	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(self)
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	n, err := windows.GetLongPathName(p, &buf[0], uint32(len(buf)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dst := filepath.Join(dir, name)
-	if err := os.WriteFile(dst, data, 0o755); err != nil {
-		t.Fatal(err)
+	if n == 0 || n >= uint32(len(buf)) {
+		t.Fatal("long path exceeds buffer")
 	}
-	return dst
+	return windows.UTF16ToString(buf[:n])
 }
 
 // shortAlias returns the short DOS 8.3 spelling of an existing path, and
@@ -86,18 +84,27 @@ func startChildServer(t *testing.T, program, endpoint string) {
 	}
 }
 
-// A named pipe server's own recorded image path is whatever spelling the
-// kernel wrote down when it was created: a short DOS 8.3 alias when it was
-// launched that way, unrelated to how the path is ordinarily typed or
-// resolved. ServerExpectation.Program is ordinarily the long spelling.
-// check() accepts a spaced long path, accepts a short alias of that same
-// file, and refuses a lookalike file that shares the real file's base name.
-func TestServerExpectationResolvesSpacedAndShortSpellings(t *testing.T) {
-	spacedDir := filepath.Join(t.TempDir(), "server copy")
-	if err := os.Mkdir(spacedDir, 0o755); err != nil {
+// A named pipe server's own recorded image path is whatever spelling the kernel
+// wrote down when it was created: a short DOS 8.3 alias when it was launched
+// that way, unrelated to how the path is ordinarily typed or resolved.
+// ServerExpectation.Program is ordinarily the long spelling. check() accepts
+// the long path, accepts a short alias of that same file, and refuses a
+// lookalike path that shares the real file's base name.
+//
+// The server is this test binary, started in place under each spelling, and
+// the test writes no executable. An earlier version copied the binary into a
+// temporary folder as server.exe and started the copy through its 8.3 alias;
+// Windows Defender quarantined the test binary during that run
+// (Behavior:Win32/DefenseEvasion.A!ml, 2026-11-23). The lookalike is a plain
+// file that shares the base name. The expectation names it while the real
+// binary serves through its short alias, which puts the same two spellings
+// through check().
+func TestServerExpectationResolvesShortSpellings(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	real := copyTestBinary(t, spacedDir, "server.exe")
+	real := longSpelling(t, self)
 	short, ok := shortAlias(t, real)
 	if !ok {
 		t.Skip("filesystem has no distinct DOS alias for this file")
@@ -108,7 +115,7 @@ func TestServerExpectationResolvesSpacedAndShortSpellings(t *testing.T) {
 		name    string
 		program string
 	}{
-		{"spaced-long-path", real},
+		{"long-path", real},
 		{"short-8.3-alias", short},
 	} {
 		t.Run(spelling.name, func(t *testing.T) {
@@ -127,13 +134,16 @@ func TestServerExpectationResolvesSpacedAndShortSpellings(t *testing.T) {
 		if err := os.Mkdir(otherDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		lookalike := copyTestBinary(t, otherDir, "server.exe")
+		lookalike := filepath.Join(otherDir, filepath.Base(real))
+		if err := os.WriteFile(lookalike, []byte("a lookalike name, not a program\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		endpoint := framedEndpoint(t)
-		startChildServer(t, lookalike, endpoint)
-		e := ServerExpectation{Principal: principal, Program: real}
+		startChildServer(t, short, endpoint)
+		e := ServerExpectation{Principal: principal, Program: lookalike}
 		client := FrameClient{Endpoint: endpoint, Server: &e, Timeout: 5 * time.Second}
 		if _, err := client.ExchangeFrame([]byte("payload")); !errors.Is(err, ErrServerUntrusted) {
-			t.Fatalf("server launched as lookalike %q, expectation %q: want trust refusal, got %v", lookalike, real, err)
+			t.Fatalf("server launched as %q, expectation lookalike %q: want trust refusal, got %v", short, lookalike, err)
 		}
 	})
 }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(abstraction_ipc VERSION 0.8.0 LANGUAGES C CXX)
+project(abstraction_ipc VERSION 0.8.1 LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 find_package(Threads REQUIRED)
